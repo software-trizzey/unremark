@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
+use log::{debug, error, info};
+use env_logger;
 
 #[derive(ClapParser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the Python project to analyze
     #[arg(default_value = ".")]
     path: PathBuf,
 
@@ -35,10 +36,11 @@ struct AnalysisResult {
 
 fn main() {
     dotenv().ok();
+    env_logger::init();
     let args = Args::parse();
     let ignore_dirs: Vec<&str> = args.ignore.split(',').collect();
 
-    println!("Analyzing Python files in: {}", args.path.display());
+    info!("Analyzing Python files in: {}", args.path.display());
 
     // Collect all Python files
     let python_files: Vec<PathBuf> = WalkDir::new(&args.path)
@@ -50,7 +52,7 @@ fn main() {
         .collect();
 
     let total_files = python_files.len();
-    println!("Found {} Python files to analyze", total_files);
+    debug!("Found {} Python files to analyze", total_files);
 
     let processed_files = Arc::new(AtomicUsize::new(0));
 
@@ -59,7 +61,7 @@ fn main() {
         .map(|file| {
             let result = analyze_file(file, args.fix);
             let current = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
-            println!("Progress: [{}/{}] {}", current, total_files, file.display());
+            info!("Progress: [{}/{}] {}", current, total_files, file.display());
             result
         })
         .collect();
@@ -164,15 +166,15 @@ fn print_summary(results: &[AnalysisResult]) {
     if files_with_errors > 0 {
         println!("\nErrors encountered:");
         for result in results.iter().filter(|r| !r.errors.is_empty()) {
-            println!("  {}: ", result.path.display());
+            eprintln!("  {}: ", result.path.display());
             for error in &result.errors {
-                println!("    - {}", error);
+                eprintln!("    - {}", error);
             }
         }
     }
 
     if total_redundant > 0 {
-        println!("\nRedundant comments by file:");
+        println!("\nResults by file:");
         for result in results.iter().filter(|r| !r.redundant_comments.is_empty()) {
             println!("  {}: ", result.path.display());
             for comment in &result.redundant_comments {
@@ -211,8 +213,7 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
             let line_number = child.start_position().row + 1;
             let context = find_context(child, code);
 
-            // found a comment
-            println!("Found comment on line {}: {}", line_number, comment_text);
+            debug!("Found comment on line {}: {}", line_number, comment_text);
 
             comments.push(CommentInfo {
                 text: comment_text,
@@ -220,11 +221,8 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
                 context,
             });
         }
-
-        // Recursively check child nodes
         comments.extend(detect_comments(child, code));
     }
-
     comments
 }
 
@@ -235,7 +233,7 @@ fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, Stri
     
     Ok(comments.into_iter()
         .filter_map(|comment| {
-            println!("Analyzing comment on line {}: {}", comment.line_number, comment.text);
+            debug!("Analyzing comment on line {}: {}", comment.line_number, comment.text);
             
             let message = Message {
                 role: Role::User,
@@ -270,16 +268,16 @@ fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, Stri
                         if let Some(content) = &choice.message {                            
                             if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(&content.content) {
                                 if analysis.comment_line_number == comment.line_number && analysis.is_redundant {
-                                    println!("Found redundant comment: {}", analysis.explanation);
+                                    info!("Found redundant comment: {}", analysis.explanation);
                                     return Some(comment);
                                 }
                             } else {
-                                println!("Failed to parse OpenAI response as JSON: {}", content.content);
+                                error!("Failed to parse OpenAI response as JSON: {}", content.content);
                             }
                         }
                     }
                 },
-                Err(err) => println!("Error communicating with OpenAI: {:?}", err),
+                Err(err) => error!("Error communicating with OpenAI: {:?}", err),
             }
             None
         })

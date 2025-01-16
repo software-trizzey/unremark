@@ -42,7 +42,6 @@ fn main() {
 
     info!("Analyzing Python files in: {}", args.path.display());
 
-    // Collect all Python files
     let python_files: Vec<PathBuf> = WalkDir::new(&args.path)
         .into_iter()
         .filter_entry(|e| !is_ignored(e, &ignore_dirs))

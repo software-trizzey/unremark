@@ -66,7 +66,7 @@ fn main() {
     let args = Args::parse();
     let ignore_dirs: Vec<&str> = args.ignore.split(',').collect();
 
-    info!("Analyzing Python files in: {}", args.path.display());
+    info!("Analyzing files in: {}", args.path.display());
 
     let source_files: Vec<PathBuf> = WalkDir::new(&args.path)
         .into_iter()

@@ -34,6 +34,32 @@ struct AnalysisResult {
     errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Language {
+    Python,
+    JavaScript,
+    TypeScript,
+}
+
+impl Language {
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "py" => Some(Language::Python),
+            "js" => Some(Language::JavaScript),
+            "ts" => Some(Language::TypeScript),
+            _ => None,
+        }
+    }
+
+    fn get_tree_sitter_language(&self) -> tree_sitter::Language {
+        match self {
+            Language::Python => tree_sitter_python::LANGUAGE.into(),
+            Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        }
+    }
+}
+
 fn main() {
     dotenv().ok();
     env_logger::init();
@@ -42,21 +68,26 @@ fn main() {
 
     info!("Analyzing Python files in: {}", args.path.display());
 
-    let python_files: Vec<PathBuf> = WalkDir::new(&args.path)
+    let source_files: Vec<PathBuf> = WalkDir::new(&args.path)
         .into_iter()
         .filter_entry(|e| !is_ignored(e, &ignore_dirs))
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "py"))
+        .filter(|e| {
+            e.path().extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(Language::from_extension)
+                .is_some()
+        })
         .map(|e| e.path().to_owned())
         .collect();
 
-    let total_files = python_files.len();
-    debug!("Found {} Python files to analyze", total_files);
+    let total_files = source_files.len();
+    debug!("Found {} files to analyze", total_files);
 
     let processed_files = Arc::new(AtomicUsize::new(0));
 
     // Process files in parallel
-    let results: Vec<AnalysisResult> = python_files.par_iter()
+    let results: Vec<AnalysisResult> = source_files.par_iter()
         .map(|file| {
             let result = analyze_file(file, args.fix);
             let current = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
@@ -69,13 +100,24 @@ fn main() {
 }
 
 fn analyze_file(path: &PathBuf, fix: bool) -> AnalysisResult {
+    let language = match path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(Language::from_extension) {
+            Some(lang) => lang,
+            None => return AnalysisResult {
+                path: path.clone(),
+                redundant_comments: vec![],
+                errors: vec!["Unsupported file extension".to_string()],
+            },
+    };
+
     let mut parser = Parser::new();
-    match parser.set_language(&tree_sitter_python::LANGUAGE.into()) {
+    match parser.set_language(&language.get_tree_sitter_language()) {
         Ok(_) => (),
         Err(e) => return AnalysisResult {
             path: path.clone(),
             redundant_comments: vec![],
-            errors: vec![format!("Error loading Python grammar: {}", e)],
+            errors: vec![format!("Error loading language grammar: {}", e)],
         },
     }
 

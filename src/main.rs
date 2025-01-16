@@ -1,8 +1,20 @@
+use clap::Parser as ClapParser;
 use dotenv::dotenv;
 use openai_api_rust::*;
 use openai_api_rust::chat::*;
 use tree_sitter::{Node, Parser};
 use serde::Deserialize;
+
+#[derive(ClapParser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(default_value = "main.py")]
+    file: String,
+
+    /// Remove redundant comments
+    #[arg(long, default_value_t = false)]
+    fix: bool,
+}
 
 #[derive(Debug, Clone)]
 struct CommentInfo {
@@ -21,29 +33,55 @@ struct CommentAnalysis {
 fn main() {
     dotenv().ok();
 
+    let args = Args::parse();
+    
     let mut parser = Parser::new();
     let language = tree_sitter_python::LANGUAGE;
     parser.set_language(&language.into()).expect("Error loading Python grammar");
 
-    let file_path: &str = "examples/python/main.py";
-    println!("Parsing Python file {}", file_path);
+    println!("Analyzing Python file: {}", args.file);
 
-    let source_code = std::fs::read_to_string(file_path).unwrap();
+    let source_code = std::fs::read_to_string(&args.file).unwrap_or_else(|e| {
+        eprintln!("Error reading file {}: {}", args.file, e);
+        std::process::exit(1);
+    });
+
     let tree = parser.parse(&source_code, None).unwrap();
-    assert!(!tree.root_node().has_error());
+    if tree.root_node().has_error() {
+        eprintln!("Error parsing file: syntax errors found");
+        std::process::exit(1);
+    }
 
     let root_node = tree.root_node();
-
     let comments = detect_comments(root_node, &source_code);
+    
+    if comments.is_empty() {
+        println!("No comments found in file");
+        return;
+    }
 
     let redundant_comments = analyze_comments(comments);
     
-    if !redundant_comments.is_empty() {
-        let updated_source = remove_redundant_comments(&source_code, &redundant_comments);
-        std::fs::write(file_path, updated_source).expect("Failed to write updated source file");
-        println!("Updated file written successfully!");
-    } else {
+    if redundant_comments.is_empty() {
         println!("No redundant comments found");
+        return;
+    }
+
+    // Print findings
+    println!("\nFound {} redundant comments:", redundant_comments.len());
+    for comment in &redundant_comments {
+        println!("  Line {}: {}", comment.line_number, comment.text);
+    }
+
+    if args.fix {
+        let updated_source = remove_redundant_comments(&source_code, &redundant_comments);
+        std::fs::write(&args.file, updated_source).unwrap_or_else(|e| {
+            eprintln!("Error writing updated file: {}", e);
+            std::process::exit(1);
+        });
+        println!("\nRedundant comments have been removed");
+    } else {
+        println!("\nRun with --fix to remove these comments");
     }
 }
 

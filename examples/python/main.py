@@ -1,7 +1,7 @@
 
-
+# this is the main function
 def main():
     print("Hello, world!")
 
-
-x = 5  
+# this is a redundant comment
+x = 5  # set x = 5

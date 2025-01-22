@@ -37,11 +37,34 @@ cargo run examples --json --fix
 
 ## Development
 
+Prerequisites:
+- Rust
+- Cargo
+- OpenAI API key
+
+To build the program:
+```
+cargo build
+```
+
+To run the program after making changes:
+```
+cargo run
+```
+
+## To use the program in other projects without building it
+
 Install program locally:
 ```
 cargo install --path .
 ```
-This is useful for testing the program locally in other projects.
+
+Now you can run the program with `unremark` in your shell.
+```
+unremark examples/example.py
+```
+
+This is useful for testing the program locally in other projects without having to build and release a new version of the program.
 
 Note: be sure to create a `.env` file in the root of the project with the `OPENAI_API_KEY` and `OPENAI_API_MODEL` environment variables. Or set the environment variables in your shell.
 

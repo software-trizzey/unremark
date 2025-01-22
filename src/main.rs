@@ -27,6 +27,10 @@ struct Args {
     /// Ignore specific directories (comma-separated)
     #[arg(long, default_value = "venv,node_modules,.git,__pycache__")]
     ignore: String,
+
+    /// Output results in JSON format
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Debug)]
@@ -98,7 +102,7 @@ fn main() {
         })
         .collect();
 
-    print_summary(&results);
+    print_summary(&results, args.json);
 }
 
 fn analyze_file(path: &PathBuf, fix: bool) -> AnalysisResult {
@@ -186,7 +190,36 @@ fn analyze_file(path: &PathBuf, fix: bool) -> AnalysisResult {
     }
 }
 
-fn print_summary(results: &[AnalysisResult]) {
+fn print_summary(results: &[AnalysisResult], json_output: bool) {
+    if json_output {
+        let json_results: Vec<JsonFileResult> = results.iter().map(|r| JsonFileResult {
+            path: r.path.display().to_string(),
+            redundant_comments: r.redundant_comments.iter().map(|c| JsonCommentInfo {
+                text: c.text.clone(),
+                line_number: c.line_number,
+                context: c.context.clone(),
+            }).collect(),
+            errors: r.errors.clone(),
+        }).collect();
+
+        let output = JsonOutput {
+            total_files: results.len(),
+            files_with_comments: results.iter()
+                .filter(|r| !r.redundant_comments.is_empty())
+                .count(),
+            files_with_errors: results.iter()
+                .filter(|r| !r.errors.is_empty())
+                .count(),
+            total_redundant_comments: results.iter()
+                .map(|r| r.redundant_comments.len())
+                .sum(),
+            results: json_results,
+        };
+
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return;
+    }
+
     let total_redundant = results.iter()
         .map(|r| r.redundant_comments.len())
         .sum::<usize>();
@@ -364,4 +397,27 @@ fn find_context(node: Node, code: &str) -> String {
     } else {
         context.trim().to_string()
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct JsonOutput {
+    total_files: usize,
+    files_with_comments: usize,
+    files_with_errors: usize,
+    total_redundant_comments: usize,
+    results: Vec<JsonFileResult>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct JsonFileResult {
+    path: String,
+    redundant_comments: Vec<JsonCommentInfo>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct JsonCommentInfo {
+    text: String,
+    line_number: usize,
+    context: String,
 }

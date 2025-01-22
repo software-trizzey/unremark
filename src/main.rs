@@ -322,7 +322,7 @@ fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, Stri
             };
 
             let body = ChatBody {
-                model: std::env::var("OPENAI_API_MODEL").expect("OpenAI API model not set"),
+                model: "ft:gpt-4o-mini-2024-07-18:personal:unremark:Aq45wBQq".to_string(),
                 max_tokens: Some(500),
                 temperature: Some(0_f32),
                 top_p: Some(1_f32),

@@ -66,7 +66,7 @@ unremark examples/example.py
 
 This is useful for testing the program locally in other projects without having to build and release a new version of the program.
 
-Note: be sure to create a `.env` file in the root of the project with the `OPENAI_API_KEY` and `OPENAI_API_MODEL` environment variables. Or set the environment variables in your shell.
+Note: be sure to set the environment variable in your shell `OPENAI_API_KEY` before running the program this way.
 
 
 ## TODO

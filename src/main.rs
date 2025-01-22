@@ -1,8 +1,236 @@
+/* Note: This project is still a prototype and I find it easier to keep the code in a single file. */
+
+use clap::Parser as ClapParser;
 use dotenv::dotenv;
 use openai_api_rust::*;
 use openai_api_rust::chat::*;
-use tree_sitter::{Node, Parser};
+use rayon::prelude::*;
 use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tree_sitter::{Node, Parser};
+use walkdir::WalkDir;
+use log::{debug, error, info};
+use env_logger;
+
+#[derive(ClapParser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Remove redundant comments
+    #[arg(long, default_value_t = false)]
+    fix: bool,
+
+    /// Ignore specific directories (comma-separated)
+    #[arg(long, default_value = "venv,node_modules,.git,__pycache__")]
+    ignore: String,
+}
+
+#[derive(Debug)]
+struct AnalysisResult {
+    path: PathBuf,
+    redundant_comments: Vec<CommentInfo>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Language {
+    Python,
+    JavaScript,
+    TypeScript,
+}
+
+impl Language {
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "py" => Some(Language::Python),
+            "js" => Some(Language::JavaScript),
+            "ts" => Some(Language::TypeScript),
+            _ => None,
+        }
+    }
+
+    fn get_tree_sitter_language(&self) -> tree_sitter::Language {
+        match self {
+            Language::Python => tree_sitter_python::LANGUAGE.into(),
+            Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        }
+    }
+}
+
+fn main() {
+    dotenv().ok();
+    env_logger::init();
+    let args = Args::parse();
+    let ignore_dirs: Vec<&str> = args.ignore.split(',').collect();
+
+    info!("Analyzing files in: {}", args.path.display());
+
+    let source_files: Vec<PathBuf> = WalkDir::new(&args.path)
+        .into_iter()
+        .filter_entry(|e| !is_ignored(e, &ignore_dirs))
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path().extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(Language::from_extension)
+                .is_some()
+        })
+        .map(|e| e.path().to_owned())
+        .collect();
+
+    let total_files = source_files.len();
+    debug!("Found {} files to analyze", total_files);
+
+    let processed_files = Arc::new(AtomicUsize::new(0));
+
+    // Process files in parallel
+    let results: Vec<AnalysisResult> = source_files.par_iter()
+        .map(|file| {
+            let result = analyze_file(file, args.fix);
+            let current = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
+            info!("Progress: [{}/{}] {}", current, total_files, file.display());
+            result
+        })
+        .collect();
+
+    print_summary(&results);
+}
+
+fn analyze_file(path: &PathBuf, fix: bool) -> AnalysisResult {
+    let language = match path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(Language::from_extension) {
+            Some(lang) => lang,
+            None => return AnalysisResult {
+                path: path.clone(),
+                redundant_comments: vec![],
+                errors: vec!["Unsupported file extension".to_string()],
+            },
+    };
+
+    let mut parser = Parser::new();
+    match parser.set_language(&language.get_tree_sitter_language()) {
+        Ok(_) => (),
+        Err(e) => return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![format!("Error loading language grammar: {}", e)],
+        },
+    }
+
+    let source_code = match std::fs::read_to_string(path) {
+        Ok(code) => code,
+        Err(e) => return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![format!("Error reading file: {}", e)],
+        },
+    };
+
+    let tree = match parser.parse(&source_code, None) {
+        Some(tree) => tree,
+        None => return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec!["Error parsing file".to_string()],
+        },
+    };
+
+    if tree.root_node().has_error() {
+        return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec!["Syntax errors found in file".to_string()],
+        };
+    }
+
+    let comments = detect_comments(tree.root_node(), &source_code);
+    
+    if comments.is_empty() {
+        return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
+    }
+
+    let redundant_comments = match analyze_comments(comments) {
+        Ok(comments) => comments,
+        Err(e) => return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![format!("Error analyzing comments: {}", e)],
+        },
+    };
+
+    if fix && !redundant_comments.is_empty() {
+        let updated_source = remove_redundant_comments(&source_code, &redundant_comments);
+        if let Err(e) = std::fs::write(path, updated_source) {
+            return AnalysisResult {
+                path: path.clone(),
+                redundant_comments,
+                errors: vec![format!("Error writing updated file: {}", e)],
+            };
+        }
+    }
+
+    AnalysisResult {
+        path: path.clone(),
+        redundant_comments,
+        errors: vec![],
+    }
+}
+
+fn print_summary(results: &[AnalysisResult]) {
+    let total_redundant = results.iter()
+        .map(|r| r.redundant_comments.len())
+        .sum::<usize>();
+
+    let files_with_errors = results.iter()
+        .filter(|r| !r.errors.is_empty())
+        .count();
+
+    let files_with_comments = results.iter()
+        .filter(|r| !r.redundant_comments.is_empty())
+        .count();
+
+    println!("\nAnalysis Summary:");
+    println!("----------------");
+    println!("Total files processed: {}", results.len());
+    println!("Files with redundant comments: {}", files_with_comments);
+    println!("Files with errors: {}", files_with_errors);
+    println!("Total redundant comments found: {}", total_redundant);
+
+    if files_with_errors > 0 {
+        println!("\nErrors encountered:");
+        for result in results.iter().filter(|r| !r.errors.is_empty()) {
+            eprintln!("  {}: ", result.path.display());
+            for error in &result.errors {
+                eprintln!("    - {}", error);
+            }
+        }
+    }
+
+    if total_redundant > 0 {
+        println!("\nResults by file:");
+        for result in results.iter().filter(|r| !r.redundant_comments.is_empty()) {
+            println!("  {}: ", result.path.display());
+            for comment in &result.redundant_comments {
+                println!("    Line {}: {}", comment.line_number, comment.text);
+            }
+        }
+    }
+}
+
+fn is_ignored(entry: &walkdir::DirEntry, ignore_dirs: &[&str]) -> bool {
+    entry.file_type().is_dir() && 
+    ignore_dirs.iter().any(|dir| entry.file_name().to_str().map_or(false, |s| s == *dir))
+}
 
 #[derive(Debug, Clone)]
 struct CommentInfo {
@@ -18,35 +246,6 @@ struct CommentAnalysis {
     explanation: String,
 }
 
-fn main() {
-    dotenv().ok();
-
-    let mut parser = Parser::new();
-    let language = tree_sitter_python::LANGUAGE;
-    parser.set_language(&language.into()).expect("Error loading Python grammar");
-
-    let file_path: &str = "examples/python/main.py";
-    println!("Parsing Python file {}", file_path);
-
-    let source_code = std::fs::read_to_string(file_path).unwrap();
-    let tree = parser.parse(&source_code, None).unwrap();
-    assert!(!tree.root_node().has_error());
-
-    let root_node = tree.root_node();
-
-    let comments = detect_comments(root_node, &source_code);
-
-    let redundant_comments = analyze_comments(comments);
-    
-    if !redundant_comments.is_empty() {
-        let updated_source = remove_redundant_comments(&source_code, &redundant_comments);
-        std::fs::write(file_path, updated_source).expect("Failed to write updated source file");
-        println!("Updated file written successfully!");
-    } else {
-        println!("No redundant comments found");
-    }
-}
-
 fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
     let mut comments = Vec::new();
     let mut cursor = node.walk();
@@ -57,8 +256,7 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
             let line_number = child.start_position().row + 1;
             let context = find_context(child, code);
 
-            // found a comment
-            println!("Found comment on line {}: {}", line_number, comment_text);
+            debug!("Found comment on line {}: {}", line_number, comment_text);
 
             comments.push(CommentInfo {
                 text: comment_text,
@@ -66,22 +264,19 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
                 context,
             });
         }
-
-        // Recursively check child nodes
         comments.extend(detect_comments(child, code));
     }
-
     comments
 }
 
-fn analyze_comments(comments: Vec<CommentInfo>) -> Vec<CommentInfo> {
+fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, String> {
     let openai_api_key = std::env::var("OPENAI_API_KEY").expect("OpenAI API key not set");
     let auth = Auth::new(&openai_api_key);
     let openai = OpenAI::new(auth, "https://api.openai.com/v1/");
     
-    comments.into_iter()
+    Ok(comments.into_iter()
         .filter_map(|comment| {
-            println!("Analyzing comment on line {}: {}", comment.line_number, comment.text);
+            debug!("Analyzing comment on line {}: {}", comment.line_number, comment.text);
             
             let message = Message {
                 role: Role::User,
@@ -116,22 +311,21 @@ fn analyze_comments(comments: Vec<CommentInfo>) -> Vec<CommentInfo> {
                         if let Some(content) = &choice.message {                            
                             if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(&content.content) {
                                 if analysis.comment_line_number == comment.line_number && analysis.is_redundant {
-                                    println!("Found redundant comment: {}", analysis.explanation);
+                                    info!("Found redundant comment: {}", analysis.explanation);
                                     return Some(comment);
                                 }
                             } else {
-                                println!("Failed to parse OpenAI response as JSON: {}", content.content);
+                                error!("Failed to parse OpenAI response as JSON: {}", content.content);
                             }
                         }
                     }
                 },
-                Err(err) => println!("Error communicating with OpenAI: {:?}", err),
+                Err(err) => error!("Error communicating with OpenAI: {:?}", err),
             }
             None
         })
-        .collect()
+        .collect())
 }
-
 
 fn remove_redundant_comments(source: &str, redundant_comments: &[CommentInfo]) -> String {
     let mut updated_source = source.to_string();

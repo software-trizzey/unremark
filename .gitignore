@@ -2,3 +2,6 @@
 
 .env
 .DS_Store
+
+# Misc
+training.jsonl

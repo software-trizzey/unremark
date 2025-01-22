@@ -4,8 +4,35 @@ A tool to find comments and remove redundant comments in code.
 
 
 ## Usage
+
+Check the code of a single file:
 ```
-cargo run examples/python --fix
+cargo run examples/example.py
+```
+
+Check the code of a directory:
+```
+cargo run examples
+```
+
+Fix the code of a single file:
+```
+cargo run examples/example.py --fix
+```
+
+Fix the code of a directory:
+```
+cargo run examples --fix
+```
+
+Output in JSON format:
+```
+cargo run examples --json
+```
+
+Output in JSON format with fix:
+```
+cargo run examples --json --fix
 ```
 
 ## Development

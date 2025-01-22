@@ -5,7 +5,7 @@ A tool to find comments and remove redundant comments in code.
 
 ## Usage
 ```
-cargo run --release examples/python --fix
+cargo run examples/python --fix
 ```
 
 ## TODO

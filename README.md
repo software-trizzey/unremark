@@ -12,6 +12,7 @@ cargo run examples/python --fix
 - [x] Add support for javascript
 - [x] Add support for typescript
 - [x] Add support for python
+- [x] Add support for json output
 - [ ] Add support for rust
 - [ ] Add support for ignoring specific files
 - [ ] Add support for ignoring specific lines

@@ -1,3 +1,5 @@
+/* Note: This project is still a prototype and I find it easier to keep the code in a single file. */
+
 use clap::Parser as ClapParser;
 use dotenv::dotenv;
 use openai_api_rust::*;

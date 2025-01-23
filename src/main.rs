@@ -82,9 +82,10 @@ struct Cache {
     entries: HashMap<String, CacheEntry>,
 }
 
+const CACHE_FILE_NAME: &str = "analysis_cache.json";
+
 impl Cache {
-    fn load() -> Self {
-        let cache_path = get_cache_path();
+    fn load_from_path(cache_path: &PathBuf) -> Self {
         match fs::read_to_string(cache_path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or(Cache {
                 entries: HashMap::new(),
@@ -95,24 +96,29 @@ impl Cache {
         }
     }
 
-    fn save(&self) {
-        let cache_path = get_cache_path();
+    fn save_to_path(&self, cache_path: &PathBuf) {
         if let Ok(contents) = serde_json::to_string(self) {
             let _ = fs::write(cache_path, contents);
         }
     }
+
+    fn load() -> Self {
+        Self::load_from_path(&get_cache_path())
+    }
+
+    fn save(&self) {
+        self.save_to_path(&get_cache_path())
+    }
 }
 
-// Add helper function to get cache file path
 fn get_cache_path() -> PathBuf {
     let mut cache_dir = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
     cache_dir.push("unremark");
     fs::create_dir_all(&cache_dir).unwrap_or_default();
-    cache_dir.push("analysis_cache.json");
+    cache_dir.push(CACHE_FILE_NAME);
     cache_dir
 }
 
-// Update CommentInfo to support serialization
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CommentInfo {
     text: String,
@@ -509,4 +515,70 @@ struct JsonCommentInfo {
     text: String,
     line_number: usize,
     context: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_test_cache() -> (TempDir, PathBuf) {
+        let temporary_directory = TempDir::new().unwrap();
+        let cache_path = temporary_directory.path().join(CACHE_FILE_NAME);
+        (temporary_directory, cache_path)
+    }
+
+    #[test]
+    fn test_cache_storage_and_retrieval() {
+        let (temporary_directory, cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.py");
+        fs::write(&test_file, "# Test comment\ndef test():\n    pass").unwrap();
+
+        let result1 = analyze_file(&test_file, false, &cache);
+        cache.write().save_to_path(&cache_path); // Save to test cache path
+        assert!(!result1.redundant_comments.is_empty(), "Should find redundant comments");
+
+        let cache_contents = fs::read_to_string(&cache_path).unwrap_or_default();
+        assert!(!cache_contents.is_empty(), "Cache file should not be empty");
+
+        let cache2 = Arc::new(parking_lot::RwLock::new(Cache::load_from_path(&cache_path)));
+        let result2 = analyze_file(&test_file, false, &cache2);
+        assert_eq!(
+            result1.redundant_comments.len(),
+            result2.redundant_comments.len(),
+            "Cached results should match original analysis"
+        );
+    }
+
+    #[test]
+    fn test_cache_invalidation() {
+        let (temporary_directory, cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.py");
+        fs::write(&test_file, "# This is a test file\ndef calculate_sum(a, b):\n    return a + b").unwrap();
+
+        let result1 = analyze_file(&test_file, false, &cache);
+        cache.write().save_to_path(&cache_path); // Save after first analysis
+
+        // Modify the file with a useful comment
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        fs::write(&test_file, "# This function uses integer arithmetic for precise calculations\ndef calculate_sum(a, b):\n    return a + b").unwrap();
+
+        let cache2 = Arc::new(parking_lot::RwLock::new(Cache::load_from_path(&cache_path)));
+        let result2 = analyze_file(&test_file, false, &cache2);
+
+        assert_ne!(
+            result1.redundant_comments.len(),
+            result2.redundant_comments.len(),
+            "Results should differ after file modification"
+        );
+    }
 }

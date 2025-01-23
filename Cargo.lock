@@ -1189,6 +1189,7 @@ dependencies = [
  "openai_api_rust",
  "parking_lot",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

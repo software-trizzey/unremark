@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 use std::fs;
 use parking_lot;
+use regex;
 
 #[derive(ClapParser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -455,12 +456,92 @@ fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, Stri
 fn remove_redundant_comments(source: &str, redundant_comments: &[CommentInfo]) -> String {
     let mut updated_source = source.to_string();
 
-    for comment in redundant_comments {
-        println!("Removing comment at line {}: {}", comment.line_number, comment.text);
-        updated_source = updated_source.replacen(&comment.text, "", 1);
+    // First, find all docstring positions to avoid modifying them
+    let docstring_pattern = match std::path::Path::new(&source)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    {
+        Some("py") => r#"(?m)[\t ]*'''[^']*'''|[\t ]*"""[^"]*""""#,
+        _ => r#"(?m)$^"#  // Match nothing for non-Python files
+    };
+    let docstring_regex = regex::Regex::new(docstring_pattern).unwrap();
+    let docstring_positions: Vec<_> = docstring_regex.find_iter(&updated_source)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+
+    debug!("Source content:\n{}", updated_source);
+    debug!("Found {} docstrings", docstring_positions.len());
+    for (i, (start, end)) in docstring_positions.iter().enumerate() {
+        let docstring = &updated_source[*start..*end];
+        debug!("Docstring {} at positions {}..{}:\n{}", 
+            i,
+            start,
+            end,
+            docstring
+        );
     }
 
-    updated_source
+    for comment in redundant_comments {
+        let comment_text = &comment.text;
+        
+        // Get the position of this comment in the source
+        if let Some(comment_pos) = updated_source.find(comment_text) {
+            debug!("Found comment '{}' at position {}", 
+                comment_text.replace('\n', "\\n"), 
+                comment_pos
+            );
+            
+            // Check if this comment is part of a docstring
+            let is_in_docstring = docstring_positions.iter()
+                .any(|&(start, end)| {
+                    let in_range = comment_pos >= start && comment_pos < end;
+                    if in_range {
+                        debug!("Comment is inside docstring range {}..{}", start, end);
+                    }
+                    in_range
+                });
+            
+            if is_in_docstring {
+                debug!("Skipping comment in docstring: {}", comment_text);
+                continue;
+            }
+
+            // For single-line comments, ensure we match the exact comment
+            let pattern = if comment_text.starts_with('#') || comment_text.starts_with("//") {
+                if comment_pos > 0 && updated_source[..comment_pos].trim_end().chars().last() != Some('{') {
+                    // Inline comment
+                    format!("[ \t]*{}[ \t]*(?:\r?\n|$)", regex::escape(comment_text))
+                } else {
+                    // Line-start comment
+                    format!("(?m)^[ \t]*{}[ \t]*(?:\r?\n|$)", regex::escape(comment_text))
+                }
+            } else {
+                format!("[ \t]*{}[ \t]*", regex::escape(comment_text))
+            };
+
+            // Use regex to ensure we only replace exact matches
+            if let Ok(regex) = regex::Regex::new(&pattern) {
+                debug!("Removing comment at line {}: {} with pattern {}", 
+                    comment.line_number, 
+                    comment_text,
+                    pattern
+                );
+                updated_source = regex.replace_all(&updated_source, "").to_string();
+            }
+        }
+    }
+
+    // Clean up any empty lines created by comment removal
+    let cleaned = updated_source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    debug!("Final content:\n{}", cleaned);
+
+    // Ensure we end with a newline
+    cleaned + "\n"
 }
 
 fn find_context(node: Node, code: &str) -> String {
@@ -735,5 +816,195 @@ struct DocumentedStruct {
         assert!(!final_content.contains("// This is a redundant comment"), "Should remove redundant comment");
         assert!(final_content.contains("fn documented_function(x: i32) -> i32 {"), "Should preserve function signature");
         assert!(final_content.contains("struct DocumentedStruct {"), "Should preserve struct definition");
+    }
+
+    #[test]
+    fn test_python_comment_analysis() {
+        let (temporary_directory, _cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.py");
+        let initial_content = r#"
+#!/usr/bin/env python3
+"""
+Module level docstring
+that should be preserved
+"""
+
+# This is a redundant file comment
+def calculate_sum(a: int, b: int) -> int:
+    '''Function level docstring that should be preserved'''
+    # Adds two numbers together
+    return a + b  # Returns the sum
+
+class Point:
+    """
+    Class level docstring
+    that should be preserved
+    """
+    def __init__(self, x: int, y: int):
+        # Initialize coordinates
+        self.x = x  # x coordinate
+        self.y = y  # y coordinate
+"#;
+        fs::write(&test_file, initial_content).unwrap();
+
+        let analysis_result = analyze_file(&test_file, false, &cache);
+        
+        let comment_texts: Vec<&str> = analysis_result.redundant_comments
+            .iter()
+            .map(|c| c.text.trim())
+            .collect();
+
+        assert!(!analysis_result.redundant_comments.is_empty(), "Should identify redundant comments");
+        assert!(comment_texts.contains(&"# This is a redundant file comment"), "Should detect file-level comment");
+        assert!(comment_texts.contains(&"# Adds two numbers together"), "Should detect function comment");
+        assert!(comment_texts.contains(&"# Returns the sum"), "Should detect inline comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Module level docstring")), "Should not detect module docstring");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Function level docstring")), "Should not detect function docstring");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Class level docstring")), "Should not detect class docstring");
+
+        let fix_result = analyze_file(&test_file, true, &cache);
+        assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+        
+        let final_content = fs::read_to_string(&test_file).unwrap();
+        assert!(final_content.contains("'''Function level docstring"), "Should preserve function docstring");
+        assert!(!final_content.contains("# This is a redundant file comment"), "Should remove redundant comment");
+    }
+
+    #[test]
+    fn test_javascript_comment_analysis() {
+        let (temporary_directory, _cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.js");
+        let initial_content = r#"
+/**
+ * @fileoverview Module documentation
+ * that should be preserved
+ */
+
+// This is a redundant file comment
+function calculateSum(a, b) {
+    /** 
+     * Function documentation
+     * that should be preserved
+     */
+    // Adds two numbers together
+    return a + b; // Returns the sum
+}
+
+// Another redundant comment
+class Point {
+    /**
+     * Class documentation
+     * that should be preserved
+     */
+    constructor(x, y) {
+        // Initialize coordinates
+        this.x = x; // x coordinate
+        this.y = y; // y coordinate
+    }
+}
+"#;
+        fs::write(&test_file, initial_content).unwrap();
+
+        let analysis_result = analyze_file(&test_file, false, &cache);
+        
+        let comment_texts: Vec<&str> = analysis_result.redundant_comments
+            .iter()
+            .map(|c| c.text.trim())
+            .collect();
+
+        assert!(!analysis_result.redundant_comments.is_empty(), "Should identify redundant comments");
+        assert!(comment_texts.contains(&"// This is a redundant file comment"), "Should detect file-level comment");
+        assert!(comment_texts.contains(&"// Adds two numbers together"), "Should detect function comment");
+        assert!(comment_texts.contains(&"// Returns the sum"), "Should detect inline comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("@fileoverview")), "Should not detect JSDoc module comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Function documentation")), "Should not detect JSDoc function comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Class documentation")), "Should not detect JSDoc class comment");
+
+        let fix_result = analyze_file(&test_file, true, &cache);
+        assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+        let final_content = fs::read_to_string(&test_file).unwrap();
+
+        assert!(final_content.contains("@fileoverview Module documentation"), "Should preserve JSDoc module comment");
+        assert!(final_content.contains("Function documentation"), "Should preserve JSDoc function comment");
+        assert!(final_content.contains("Class documentation"), "Should preserve JSDoc class comment");
+        assert!(!final_content.contains("// This is a redundant file comment"), "Should remove redundant comment");
+    }
+
+    #[test]
+    fn test_typescript_comment_analysis() {
+        let (temporary_directory, _cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.ts");
+        let initial_content = r#"
+/**
+ * @fileoverview Module documentation
+ * that should be preserved
+ */
+
+// This is a redundant file comment
+function calculateSum(a: number, b: number): number {
+    /** 
+     * Function documentation
+     * that should be preserved
+     */
+    // Adds two numbers together
+    return a + b; // Returns the sum
+}
+
+// Another redundant comment
+class Point {
+    /**
+     * Class documentation
+     * that should be preserved
+     */
+    constructor(
+        private x: number, // x coordinate
+        private y: number  // y coordinate
+    ) {
+        // Initialize coordinates
+    }
+}
+
+interface Shape {
+    /** Interface documentation that should be preserved */
+    getArea(): number;
+}
+"#;
+        fs::write(&test_file, initial_content).unwrap();
+
+        let analysis_result = analyze_file(&test_file, false, &cache);
+        
+        let comment_texts: Vec<&str> = analysis_result.redundant_comments
+            .iter()
+            .map(|c| c.text.trim())
+            .collect();
+
+        assert!(!analysis_result.redundant_comments.is_empty(), "Should identify redundant comments");
+        assert!(comment_texts.contains(&"// This is a redundant file comment"), "Should detect file-level comment");
+        assert!(comment_texts.contains(&"// Adds two numbers together"), "Should detect function comment");
+        assert!(comment_texts.contains(&"// Returns the sum"), "Should detect inline comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("@fileoverview")), "Should not detect TSDoc module comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Function documentation")), "Should not detect TSDoc function comment");
+        assert!(!comment_texts.iter().any(|&c| c.contains("Interface documentation")), "Should not detect TSDoc interface comment");
+
+        let fix_result = analyze_file(&test_file, true, &cache);
+        assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+        let final_content = fs::read_to_string(&test_file).unwrap();
+
+        assert!(final_content.contains("@fileoverview Module documentation"), "Should preserve TSDoc module comment");
+        assert!(final_content.contains("Function documentation"), "Should preserve TSDoc function comment");
+        assert!(final_content.contains("Interface documentation"), "Should preserve TSDoc interface comment");
+        assert!(!final_content.contains("// This is a redundant file comment"), "Should remove redundant comment");
     }
 }

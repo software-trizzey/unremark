@@ -49,6 +49,7 @@ enum Language {
     Python,
     JavaScript,
     TypeScript,
+    Rust,
 }
 
 impl Language {
@@ -57,6 +58,7 @@ impl Language {
             "py" => Some(Language::Python),
             "js" => Some(Language::JavaScript),
             "ts" => Some(Language::TypeScript),
+            "rs" => Some(Language::Rust),
             _ => None,
         }
     }
@@ -66,6 +68,7 @@ impl Language {
             Language::Python => tree_sitter_python::LANGUAGE.into(),
             Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         }
     }
 }
@@ -112,11 +115,14 @@ impl Cache {
 }
 
 fn get_cache_path() -> PathBuf {
-    let mut cache_dir = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
-    cache_dir.push("unremark");
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("unremark");
+    
+    debug!("Cache directory: {}", cache_dir.display());
     fs::create_dir_all(&cache_dir).unwrap_or_default();
-    cache_dir.push(CACHE_FILE_NAME);
-    cache_dir
+    
+    cache_dir.join(CACHE_FILE_NAME)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -181,17 +187,23 @@ fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    debug!("Analyzing file: {}", path.display());
+    debug!("Last modified: {}", last_modified);
+
     let redundant_comments = {
         let cache_read = cache.read();
         if let Some(entry) = cache_read.entries.get(&path_str) {
+            debug!("Found cache entry with last_modified: {}", entry.last_modified);
             if entry.last_modified == last_modified {
                 debug!("Using cached results for {}", path.display());
                 entry.redundant_comments.clone()
             } else {
+                debug!("Cache outdated, analyzing file");
                 drop(cache_read);
                 analyze_and_cache_file(path, cache, last_modified, path_str)
             }
         } else {
+            debug!("No cache entry found, analyzing file");
             drop(cache_read);
             analyze_and_cache_file(path, cache, last_modified, path_str)
         }
@@ -350,12 +362,26 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
-        if child.kind() == "comment" {
-            let comment_text = code[child.byte_range()].to_string();
+        debug!("Node kind: {} at line {}", child.kind(), child.start_position().row + 1);
+        if child.kind().contains("comment") {
+            let comment_text = code[child.byte_range()].trim().to_string();
+            
+            // Skip documentation comments for all supported languages
+            if comment_text.starts_with("///") ||    // Rust doc comments
+               comment_text.starts_with("//!") ||    // Rust module doc comments
+               comment_text.starts_with("/**") ||    // JSDoc/TSDoc/Rust block doc comments
+               comment_text.starts_with("/*!")  ||   // Rust module block doc comments
+               comment_text.starts_with("\"\"\"") || // Python docstrings
+               comment_text.starts_with("'''") {     // Python docstrings (alternative)
+                debug!("Skipping doc comment: {}", comment_text);
+                continue;
+            }
+
             let line_number = child.start_position().row + 1;
             let context = find_context(child, code);
 
-            debug!("Found comment on line {}: {}", line_number, comment_text);
+            debug!("Found comment: '{}' of type '{}' on line {}", 
+                comment_text, child.kind(), line_number);
 
             comments.push(CommentInfo {
                 text: comment_text,
@@ -500,8 +526,16 @@ mod tests {
         (temporary_directory, cache_path)
     }
 
+    fn clear_cache() {
+        if let Ok(cache_path) = get_cache_path().canonicalize() {
+            debug!("Clearing cache at: {}", cache_path.display());
+            let _ = fs::remove_file(cache_path);
+        }
+    }
+
     #[test]
     fn test_cache_storage_and_retrieval() {
+        clear_cache(); // Add this at the start of each test
         let (temporary_directory, cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -596,5 +630,110 @@ mod tests {
         assert!(!final_content.contains("# Another test comment"), "Redundant comment should be removed");
         assert!(!final_content.contains("# Performs addition"), "Redundant comment should be removed");
         assert!(!result2.redundant_comments.is_empty(), "Should find redundant comments from cache");
+    }
+
+    #[test]
+    fn test_rust_comment_analysis() {
+        let (temporary_directory, _cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.rs");
+        let initial_content = r#"
+// This is a test file
+fn calculate_sum(a: i32, b: i32) -> i32 {
+    // Adds two numbers together
+    a + b  // Returns the sum
+}
+
+// Another redundant comment
+struct Point {
+    // The x coordinate
+    x: i32,
+    // The y coordinate
+    y: i32,
+}
+"#;
+        fs::write(&test_file, initial_content).unwrap();
+
+        let analysis_result = analyze_file(&test_file, false, &cache);
+        assert!(!analysis_result.redundant_comments.is_empty(), "Should identify redundant comments in Rust code");
+        
+        let comment_texts: Vec<&str> = analysis_result.redundant_comments
+            .iter()
+            .map(|c| c.text.trim())
+            .collect();
+        
+        assert!(comment_texts.contains(&"// This is a test file"), "Should detect file-level redundant comment");
+        assert!(comment_texts.contains(&"// Adds two numbers together"), "Should detect redundant function comment");
+        assert!(comment_texts.contains(&"// Returns the sum"), "Should detect redundant inline comment");
+
+        let fix_result = analyze_file(&test_file, true, &cache);
+        assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+
+        let final_content = fs::read_to_string(&test_file).unwrap();
+        assert!(!final_content.contains("// This is a test file"), "Should remove redundant file comment");
+        assert!(!final_content.contains("// Adds two numbers together"), "Should remove redundant function comment");
+        assert!(!final_content.contains("// Returns the sum"), "Should remove redundant inline comment");
+        
+        assert!(final_content.contains("fn calculate_sum(a: i32, b: i32) -> i32 {"), "Should preserve function signature");
+        assert!(final_content.contains("struct Point {"), "Should preserve struct definition");
+        assert!(final_content.contains("x: i32,"), "Should preserve struct fields");
+        assert!(final_content.contains("y: i32,"), "Should preserve struct fields");
+    }
+
+    #[test]
+    fn test_rust_doc_comments_ignored() {
+        let (temporary_directory, _cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.rs");
+        let initial_content = r#"
+//! Module-level documentation
+//! that should be preserved
+
+/// Documentation for the function
+/// that spans multiple lines
+fn documented_function(x: i32) -> i32 {
+    // This is a redundant comment
+    x + 1
+}
+
+/** 
+ * Alternative doc comment style
+ * that should also be preserved
+ */
+struct DocumentedStruct {
+    /// Documentation for x field
+    x: i32,
+    /** Documentation for y field */
+    y: i32,
+}
+"#;
+        fs::write(&test_file, initial_content).unwrap();
+
+        let analysis_result = analyze_file(&test_file, false, &cache);
+        
+        assert_eq!(analysis_result.redundant_comments.len(), 1, "Should only detect one redundant comment");
+        assert_eq!(
+            analysis_result.redundant_comments[0].text.trim(),
+            "// This is a redundant comment",
+            "Should only detect the non-doc comment as redundant"
+        );
+
+        let fix_result = analyze_file(&test_file, true, &cache);
+        assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+        let final_content = fs::read_to_string(&test_file).unwrap();
+        assert!(final_content.contains("//! Module-level documentation"), "Should preserve module doc comments");
+        assert!(final_content.contains("/// Documentation for the function"), "Should preserve function doc comments");
+        assert!(final_content.contains("* Alternative doc comment style"), "Should preserve alternative doc style");
+        assert!(final_content.contains("/// Documentation for x field"), "Should preserve field doc comments");
+        assert!(final_content.contains("/** Documentation for y field */"), "Should preserve inline doc comments");
+        assert!(!final_content.contains("// This is a redundant comment"), "Should remove redundant comment");
+        assert!(final_content.contains("fn documented_function(x: i32) -> i32 {"), "Should preserve function signature");
+        assert!(final_content.contains("struct DocumentedStruct {"), "Should preserve struct definition");
     }
 }

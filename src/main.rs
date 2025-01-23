@@ -13,6 +13,10 @@ use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
 use log::{debug, error, info};
 use env_logger;
+use std::collections::HashMap;
+use std::time::SystemTime;
+use std::fs;
+use parking_lot;
 
 #[derive(ClapParser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -66,6 +70,56 @@ impl Language {
     }
 }
 
+// Add new structs for caching
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CacheEntry {
+    last_modified: u64,
+    redundant_comments: Vec<CommentInfo>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Cache {
+    entries: HashMap<String, CacheEntry>,
+}
+
+impl Cache {
+    fn load() -> Self {
+        let cache_path = get_cache_path();
+        match fs::read_to_string(cache_path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or(Cache {
+                entries: HashMap::new(),
+            }),
+            Err(_) => Cache {
+                entries: HashMap::new(),
+            },
+        }
+    }
+
+    fn save(&self) {
+        let cache_path = get_cache_path();
+        if let Ok(contents) = serde_json::to_string(self) {
+            let _ = fs::write(cache_path, contents);
+        }
+    }
+}
+
+// Add helper function to get cache file path
+fn get_cache_path() -> PathBuf {
+    let mut cache_dir = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
+    cache_dir.push("unremark");
+    fs::create_dir_all(&cache_dir).unwrap_or_default();
+    cache_dir.push("analysis_cache.json");
+    cache_dir
+}
+
+// Update CommentInfo to support serialization
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CommentInfo {
+    text: String,
+    line_number: usize,
+    context: String,
+}
+
 fn main() {
     dotenv().ok();
     env_logger::init();
@@ -92,20 +146,49 @@ fn main() {
 
     let processed_files = Arc::new(AtomicUsize::new(0));
 
-    // Process files in parallel
+    // Use Arc to share cache across threads
+    let cache = Arc::new(parking_lot::RwLock::new(Cache::load()));
+    
     let results: Vec<AnalysisResult> = source_files.par_iter()
         .map(|file| {
-            let result = analyze_file(file, args.fix);
+            let cache = Arc::clone(&cache);
+            let result = analyze_file(file, args.fix, &cache);
             let current = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
             info!("Progress: [{}/{}] {}", current, total_files, file.display());
             result
         })
         .collect();
 
+    // Save the cache after all processing
+    cache.write().save();
     print_summary(&results, args.json);
 }
 
-fn analyze_file(path: &PathBuf, fix: bool) -> AnalysisResult {
+fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -> AnalysisResult {
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let path_str = canonical_path.to_string_lossy().to_string();
+
+    // Get file's last modified time
+    let last_modified = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    {
+        let cache_read = cache.read();
+        if let Some(entry) = cache_read.entries.get(&path_str) {
+            if entry.last_modified == last_modified {
+                debug!("Using cached results for {}", path.display());
+                return AnalysisResult {
+                    path: path.clone(),
+                    redundant_comments: entry.redundant_comments.clone(),
+                    errors: vec![],
+                };
+            }
+        }
+    }
+
     let language = match path.extension()
         .and_then(|ext| ext.to_str())
         .and_then(Language::from_extension) {
@@ -182,6 +265,19 @@ fn analyze_file(path: &PathBuf, fix: bool) -> AnalysisResult {
             };
         }
     }
+
+    // Update cache with write lock
+    let mut cache_write = cache.write();
+    cache_write.entries.insert(
+        path_str,
+        CacheEntry {
+            last_modified,
+            redundant_comments: redundant_comments.clone(),
+        },
+    );
+
+    // Add debug logging to track cache operations
+    debug!("Cached results for {}: {} comments", path.display(), redundant_comments.len());
 
     AnalysisResult {
         path: path.clone(),
@@ -263,13 +359,6 @@ fn print_summary(results: &[AnalysisResult], json_output: bool) {
 fn is_ignored(entry: &walkdir::DirEntry, ignore_dirs: &[&str]) -> bool {
     entry.file_type().is_dir() && 
     ignore_dirs.iter().any(|dir| entry.file_name().to_str().map_or(false, |s| s == *dir))
-}
-
-#[derive(Debug, Clone)]
-struct CommentInfo {
-    text: String,
-    line_number: usize,
-    context: String,
 }
 
 #[derive(Debug, Deserialize)]

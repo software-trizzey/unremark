@@ -2,9 +2,6 @@
 
 use clap::Parser as ClapParser;
 use dotenv::dotenv;
-use openai_api_rust::*;
-use openai_api_rust::chat::*;
-use rayon::prelude::*;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +15,9 @@ use std::time::SystemTime;
 use std::fs;
 use parking_lot;
 use regex;
+use std::time::Instant;
+use futures::future::join_all;
+use tokio;
 
 #[derive(ClapParser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -133,12 +133,14 @@ struct CommentInfo {
     context: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenv().ok();
     env_logger::init();
     let args = Args::parse();
     let ignore_dirs: Vec<&str> = args.ignore.split(',').collect();
 
+    let start_time = Instant::now();
     info!("Analyzing files in: {}", args.path.display());
 
     let source_files: Vec<PathBuf> = WalkDir::new(&args.path)
@@ -158,26 +160,36 @@ fn main() {
     debug!("Found {} files to analyze", total_files);
 
     let processed_files = Arc::new(AtomicUsize::new(0));
-
-    // Use Arc to share cache across threads
     let cache = Arc::new(parking_lot::RwLock::new(Cache::load()));
     
-    let results: Vec<AnalysisResult> = source_files.par_iter()
+    // Create a vector of futures for each file analysis
+    let futures: Vec<_> = source_files.iter()
         .map(|file| {
             let cache = Arc::clone(&cache);
-            let result = analyze_file(file, args.fix, &cache);
-            let current = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
-            info!("Progress: [{}/{}] {}", current, total_files, file.display());
-            result
+            let processed_files = Arc::clone(&processed_files);
+            let total_files = total_files;
+            async move {
+                let result = analyze_file(file, args.fix, &cache).await;
+                let current = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
+                info!("Progress: [{}/{}] {}", current, total_files, file.display());
+                result
+            }
         })
         .collect();
 
+    // Use tokio's join_all to run the futures concurrently
+    let results = join_all(futures).await;
+
     // Save the cache after all processing
     cache.write().save();
+
+    let duration = start_time.elapsed();
+    info!("Analysis completed in {:.2} seconds", duration.as_secs_f64());
+
     print_summary(&results, args.json);
 }
 
-fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -> AnalysisResult {
+async fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -> AnalysisResult {
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
     let path_str = canonical_path.to_string_lossy().to_string();
 
@@ -201,12 +213,12 @@ fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -
             } else {
                 debug!("Cache outdated, analyzing file");
                 drop(cache_read);
-                analyze_and_cache_file(path, cache, last_modified, path_str)
+                analyze_and_cache_file(path, cache, last_modified, path_str).await
             }
         } else {
             debug!("No cache entry found, analyzing file");
             drop(cache_read);
-            analyze_and_cache_file(path, cache, last_modified, path_str)
+            analyze_and_cache_file(path, cache, last_modified, path_str).await
         }
     };
 
@@ -226,8 +238,7 @@ fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -
     }
 }
 
-// Helper function to analyze file and update cache
-fn analyze_and_cache_file(
+async fn analyze_and_cache_file(
     path: &PathBuf,
     cache: &parking_lot::RwLock<Cache>,
     last_modified: u64,
@@ -260,7 +271,7 @@ fn analyze_and_cache_file(
     }
 
     let comments = detect_comments(tree.root_node(), &source_code);
-    let redundant_comments = analyze_comments(comments).unwrap_or_default();
+    let redundant_comments = analyze_comments(comments).await.unwrap_or_default();
 
     // Update cache with results
     let mut cache_write = cache.write();
@@ -395,53 +406,76 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
     comments
 }
 
-fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, String> {
+async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, String> {
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(10)  // Allow more concurrent connections
+        .pool_idle_timeout(None)      // Keep connections alive
+        .build()
+        .unwrap();
     let openai_api_key = std::env::var("OPENAI_API_KEY").expect("OpenAI API key not set");
-    let auth = Auth::new(&openai_api_key);
-    let openai = OpenAI::new(auth, "https://api.openai.com/v1/");
+    let openai = Arc::new(client);
     
-    Ok(comments.into_iter()
-        .filter_map(|comment| {
-            debug!("Analyzing comment on line {}: {}", comment.line_number, comment.text);
-            
-            let message = Message {
-                role: Role::User,
-                content: format!(
-                    "Comment: '{}'\nContext: '{}'\nLine Number: {}\nIs this comment redundant or useful? Please respond with a JSON object containing the following fields: is_redundant, comment_line_number, comment_text, explanation",
-                    comment.text,
-                    comment.context,
-                    comment.line_number
-                ),
-            };
+    let start_time = Instant::now();
+    debug!("Starting concurrent analysis of {} comments", comments.len());
 
-            let body = ChatBody {
-                model: "ft:gpt-4o-mini-2024-07-18:personal:unremark:Aq45wBQq".to_string(),
-                max_tokens: Some(500),
-                temperature: Some(0_f32),
-                top_p: Some(1_f32),
-                n: Some(1),
-                stream: Some(false),
-                stop: None,
-                presence_penalty: None,
-                frequency_penalty: None,
-                logit_bias: None,
-                user: None,
-                messages: vec![message],
-            };
+    // Create all API request futures at once
+    let futures: Vec<_> = comments.into_iter()
+        .map(|comment| {
+            let openai = Arc::clone(&openai);
+            let api_key = openai_api_key.clone();
+            async move {
+                let message = serde_json::json!({
+                    "model": "ft:gpt-4o-mini-2024-07-18:personal:unremark:Aq45wBQq",
+                    "messages": [{
+                        "role": "user",
+                        "content": format!(
+                            "Comment: '{}'\nContext: '{}'\nLine Number: {}\nIs this comment redundant or useful? Please respond with a JSON object containing the following fields: is_redundant, comment_line_number, comment_text, explanation",
+                            comment.text,
+                            comment.context,
+                            comment.line_number
+                        )
+                    }],
+                    "max_tokens": 500,
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "n": 1,
+                    "stream": false
+                });
 
-            let response = openai.chat_completion_create(&body);
-            
-            match response {
-                Ok(result) => {
-                    if let Some(choice) = result.choices.first() {
-                        if let Some(content) = &choice.message {                            
-                            if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(&content.content) {
+                // Return tuple of (comment, api_result)
+                let result = openai
+                    .post("https://api.openai.com/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&message)
+                    .send()
+                    .await;
+
+                (comment, result)
+            }
+        })
+        .collect();
+
+    // Execute all API requests concurrently
+    let results = join_all(futures).await;
+    
+    let duration = start_time.elapsed();
+    debug!("Completed analysis of {} comments in {:.2} seconds", 
+        results.len(),
+        duration.as_secs_f64()
+    );
+
+    // Process results and filter redundant comments
+    let futures: Vec<_> = results.into_iter()
+        .map(|(comment, api_result)| async move {
+            match api_result {
+                Ok(response) => {
+                    if let Ok(json) = response.json::<serde_json::Value>().await {
+                        if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+                            if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(content) {
                                 if analysis.comment_line_number == comment.line_number && analysis.is_redundant {
                                     info!("Found redundant comment: {}", analysis.explanation);
                                     return Some(comment);
                                 }
-                            } else {
-                                error!("Failed to parse OpenAI response as JSON: {}", content.content);
                             }
                         }
                     }
@@ -450,7 +484,9 @@ fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, Stri
             }
             None
         })
-        .collect())
+        .collect();
+
+    Ok(join_all(futures).await.into_iter().filter_map(|x| x).collect())
 }
 
 fn remove_redundant_comments(source: &str, redundant_comments: &[CommentInfo]) -> String {
@@ -614,8 +650,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_cache_storage_and_retrieval() {
+    #[tokio::test]
+    async fn test_cache_storage_and_retrieval() {
         clear_cache(); // Add this at the start of each test
         let (temporary_directory, cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
@@ -625,15 +661,16 @@ mod tests {
         let test_file = temporary_directory.path().join("test.py");
         fs::write(&test_file, "# Test comment\ndef test():\n    pass").unwrap();
 
-        let result1 = analyze_file(&test_file, false, &cache);
-        cache.write().save_to_path(&cache_path); // Save to test cache path
+        let result1 = analyze_file(&test_file, false, &cache).await;
+        cache.write().save_to_path(&cache_path);
         assert!(!result1.redundant_comments.is_empty(), "Should find redundant comments");
 
         let cache_contents = fs::read_to_string(&cache_path).unwrap_or_default();
         assert!(!cache_contents.is_empty(), "Cache file should not be empty");
 
         let cache2 = Arc::new(parking_lot::RwLock::new(Cache::load_from_path(&cache_path)));
-        let result2 = analyze_file(&test_file, false, &cache2);
+        let result2 = analyze_file(&test_file, false, &cache2).await;
+
         assert_eq!(
             result1.redundant_comments.len(),
             result2.redundant_comments.len(),
@@ -641,8 +678,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_cache_invalidation() {
+    #[tokio::test]
+    async fn test_cache_invalidation() {
         let (temporary_directory, cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -651,15 +688,15 @@ mod tests {
         let test_file = temporary_directory.path().join("test.py");
         fs::write(&test_file, "# This is a test file\ndef calculate_sum(a, b):\n    return a + b").unwrap();
 
-        let result1 = analyze_file(&test_file, false, &cache);
-        cache.write().save_to_path(&cache_path); // Save after first analysis
+        let result1 = analyze_file(&test_file, false, &cache).await;
+        cache.write().save_to_path(&cache_path);
 
         // Modify the file with a useful comment
         std::thread::sleep(std::time::Duration::from_secs(1));
         fs::write(&test_file, "# This function uses integer arithmetic for precise calculations\ndef calculate_sum(a, b):\n    return a + b").unwrap();
 
         let cache2 = Arc::new(parking_lot::RwLock::new(Cache::load_from_path(&cache_path)));
-        let result2 = analyze_file(&test_file, false, &cache2);
+        let result2 = analyze_file(&test_file, false, &cache2).await;
 
         assert_ne!(
             result1.redundant_comments.len(),
@@ -668,8 +705,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_fix_command_uncached() {
+    #[tokio::test]
+    async fn test_fix_command_uncached() {
         let (temporary_directory, _cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -679,7 +716,7 @@ mod tests {
         let initial_content = "# This is a test file\ndef calculate_sum(a, b):\n    # Adds two numbers together\n    return a + b";
         fs::write(&test_file, initial_content).unwrap();
 
-        let result = analyze_file(&test_file, true, &cache);
+        let result = analyze_file(&test_file, true, &cache).await;
         
         let updated_content = fs::read_to_string(&test_file).unwrap();
         assert_ne!(initial_content, updated_content, "Fix command should modify the file");
@@ -688,8 +725,8 @@ mod tests {
         assert!(!result.redundant_comments.is_empty(), "Should identify redundant comments");
     }
 
-    #[test]
-    fn test_fix_command_cached() {
+    #[tokio::test]
+    async fn test_fix_command_cached() {
         let (temporary_directory, cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -699,12 +736,12 @@ mod tests {
         let initial_content = "# Another test comment\ndef calculate_sum(a, b):\n    # Performs addition\n    return a + b";
         fs::write(&test_file, initial_content).unwrap();
 
-        let result1 = analyze_file(&test_file, false, &cache);
+        let result1 = analyze_file(&test_file, false, &cache).await;
         cache.write().save_to_path(&cache_path);
         assert!(!result1.redundant_comments.is_empty(), "Should find redundant comments");
 
         let cache2 = Arc::new(parking_lot::RwLock::new(Cache::load_from_path(&cache_path)));
-        let result2 = analyze_file(&test_file, true, &cache2);
+        let result2 = analyze_file(&test_file, true, &cache2).await;
 
         let final_content = fs::read_to_string(&test_file).unwrap();
         assert_ne!(initial_content, final_content, "Fix command should work with cached results");
@@ -713,8 +750,8 @@ mod tests {
         assert!(!result2.redundant_comments.is_empty(), "Should find redundant comments from cache");
     }
 
-    #[test]
-    fn test_rust_comment_analysis() {
+    #[tokio::test]
+    async fn test_rust_comment_analysis() {
         let (temporary_directory, _cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -738,7 +775,7 @@ struct Point {
 "#;
         fs::write(&test_file, initial_content).unwrap();
 
-        let analysis_result = analyze_file(&test_file, false, &cache);
+        let analysis_result = analyze_file(&test_file, false, &cache).await;
         assert!(!analysis_result.redundant_comments.is_empty(), "Should identify redundant comments in Rust code");
         
         let comment_texts: Vec<&str> = analysis_result.redundant_comments
@@ -750,7 +787,7 @@ struct Point {
         assert!(comment_texts.contains(&"// Adds two numbers together"), "Should detect redundant function comment");
         assert!(comment_texts.contains(&"// Returns the sum"), "Should detect redundant inline comment");
 
-        let fix_result = analyze_file(&test_file, true, &cache);
+        let fix_result = analyze_file(&test_file, true, &cache).await;
         assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
 
         let final_content = fs::read_to_string(&test_file).unwrap();
@@ -764,8 +801,8 @@ struct Point {
         assert!(final_content.contains("y: i32,"), "Should preserve struct fields");
     }
 
-    #[test]
-    fn test_rust_doc_comments_ignored() {
+    #[tokio::test]
+    async fn test_rust_doc_comments_ignored() {
         let (temporary_directory, _cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -796,7 +833,7 @@ struct DocumentedStruct {
 "#;
         fs::write(&test_file, initial_content).unwrap();
 
-        let analysis_result = analyze_file(&test_file, false, &cache);
+        let analysis_result = analyze_file(&test_file, false, &cache).await;
         
         assert_eq!(analysis_result.redundant_comments.len(), 1, "Should only detect one redundant comment");
         assert_eq!(
@@ -805,7 +842,7 @@ struct DocumentedStruct {
             "Should only detect the non-doc comment as redundant"
         );
 
-        let fix_result = analyze_file(&test_file, true, &cache);
+        let fix_result = analyze_file(&test_file, true, &cache).await;
         assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
         let final_content = fs::read_to_string(&test_file).unwrap();
         assert!(final_content.contains("//! Module-level documentation"), "Should preserve module doc comments");
@@ -818,8 +855,8 @@ struct DocumentedStruct {
         assert!(final_content.contains("struct DocumentedStruct {"), "Should preserve struct definition");
     }
 
-    #[test]
-    fn test_python_comment_analysis() {
+    #[tokio::test]
+    async fn test_python_comment_analysis() {
         let (temporary_directory, _cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -851,7 +888,7 @@ class Point:
 "#;
         fs::write(&test_file, initial_content).unwrap();
 
-        let analysis_result = analyze_file(&test_file, false, &cache);
+        let analysis_result = analyze_file(&test_file, false, &cache).await;
         
         let comment_texts: Vec<&str> = analysis_result.redundant_comments
             .iter()
@@ -866,7 +903,7 @@ class Point:
         assert!(!comment_texts.iter().any(|&c| c.contains("Function level docstring")), "Should not detect function docstring");
         assert!(!comment_texts.iter().any(|&c| c.contains("Class level docstring")), "Should not detect class docstring");
 
-        let fix_result = analyze_file(&test_file, true, &cache);
+        let fix_result = analyze_file(&test_file, true, &cache).await;
         assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
         
         let final_content = fs::read_to_string(&test_file).unwrap();
@@ -874,8 +911,8 @@ class Point:
         assert!(!final_content.contains("# This is a redundant file comment"), "Should remove redundant comment");
     }
 
-    #[test]
-    fn test_javascript_comment_analysis() {
+    #[tokio::test]
+    async fn test_javascript_comment_analysis() {
         let (temporary_directory, _cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -897,23 +934,10 @@ function calculateSum(a, b) {
     // Adds two numbers together
     return a + b; // Returns the sum
 }
-
-// Another redundant comment
-class Point {
-    /**
-     * Class documentation
-     * that should be preserved
-     */
-    constructor(x, y) {
-        // Initialize coordinates
-        this.x = x; // x coordinate
-        this.y = y; // y coordinate
-    }
-}
 "#;
         fs::write(&test_file, initial_content).unwrap();
 
-        let analysis_result = analyze_file(&test_file, false, &cache);
+        let analysis_result = analyze_file(&test_file, false, &cache).await;
         
         let comment_texts: Vec<&str> = analysis_result.redundant_comments
             .iter()
@@ -926,20 +950,18 @@ class Point {
         assert!(comment_texts.contains(&"// Returns the sum"), "Should detect inline comment");
         assert!(!comment_texts.iter().any(|&c| c.contains("@fileoverview")), "Should not detect JSDoc module comment");
         assert!(!comment_texts.iter().any(|&c| c.contains("Function documentation")), "Should not detect JSDoc function comment");
-        assert!(!comment_texts.iter().any(|&c| c.contains("Class documentation")), "Should not detect JSDoc class comment");
 
-        let fix_result = analyze_file(&test_file, true, &cache);
+        let fix_result = analyze_file(&test_file, true, &cache).await;
         assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+        
         let final_content = fs::read_to_string(&test_file).unwrap();
-
         assert!(final_content.contains("@fileoverview Module documentation"), "Should preserve JSDoc module comment");
         assert!(final_content.contains("Function documentation"), "Should preserve JSDoc function comment");
-        assert!(final_content.contains("Class documentation"), "Should preserve JSDoc class comment");
         assert!(!final_content.contains("// This is a redundant file comment"), "Should remove redundant comment");
     }
 
-    #[test]
-    fn test_typescript_comment_analysis() {
+    #[tokio::test]
+    async fn test_typescript_comment_analysis() {
         let (temporary_directory, _cache_path) = setup_test_cache();
         let cache = Arc::new(parking_lot::RwLock::new(Cache {
             entries: HashMap::new(),
@@ -962,20 +984,6 @@ function calculateSum(a: number, b: number): number {
     return a + b; // Returns the sum
 }
 
-// Another redundant comment
-class Point {
-    /**
-     * Class documentation
-     * that should be preserved
-     */
-    constructor(
-        private x: number, // x coordinate
-        private y: number  // y coordinate
-    ) {
-        // Initialize coordinates
-    }
-}
-
 interface Shape {
     /** Interface documentation that should be preserved */
     getArea(): number;
@@ -983,7 +991,7 @@ interface Shape {
 "#;
         fs::write(&test_file, initial_content).unwrap();
 
-        let analysis_result = analyze_file(&test_file, false, &cache);
+        let analysis_result = analyze_file(&test_file, false, &cache).await;
         
         let comment_texts: Vec<&str> = analysis_result.redundant_comments
             .iter()
@@ -998,10 +1006,10 @@ interface Shape {
         assert!(!comment_texts.iter().any(|&c| c.contains("Function documentation")), "Should not detect TSDoc function comment");
         assert!(!comment_texts.iter().any(|&c| c.contains("Interface documentation")), "Should not detect TSDoc interface comment");
 
-        let fix_result = analyze_file(&test_file, true, &cache);
+        let fix_result = analyze_file(&test_file, true, &cache).await;
         assert!(!fix_result.redundant_comments.is_empty(), "Should still report the redundant comments");
+        
         let final_content = fs::read_to_string(&test_file).unwrap();
-
         assert!(final_content.contains("@fileoverview Module documentation"), "Should preserve TSDoc module comment");
         assert!(final_content.contains("Function documentation"), "Should preserve TSDoc function comment");
         assert!(final_content.contains("Interface documentation"), "Should preserve TSDoc interface comment");

@@ -181,98 +181,75 @@ fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    {
+    let redundant_comments = {
         let cache_read = cache.read();
         if let Some(entry) = cache_read.entries.get(&path_str) {
             if entry.last_modified == last_modified {
                 debug!("Using cached results for {}", path.display());
-                return AnalysisResult {
-                    path: path.clone(),
-                    redundant_comments: entry.redundant_comments.clone(),
-                    errors: vec![],
-                };
+                entry.redundant_comments.clone()
+            } else {
+                drop(cache_read);
+                analyze_and_cache_file(path, cache, last_modified, path_str)
+            }
+        } else {
+            drop(cache_read);
+            analyze_and_cache_file(path, cache, last_modified, path_str)
+        }
+    };
+
+    if fix && !redundant_comments.is_empty() {
+        if let Ok(source) = std::fs::read_to_string(path) {
+            let updated_source = remove_redundant_comments(&source, &redundant_comments);
+            if let Err(e) = std::fs::write(path, updated_source) {
+                error!("Failed to write changes to {}: {}", path.display(), e);
             }
         }
     }
 
+    AnalysisResult {
+        path: path.clone(),
+        redundant_comments,
+        errors: vec![],
+    }
+}
+
+// Helper function to analyze file and update cache
+fn analyze_and_cache_file(
+    path: &PathBuf,
+    cache: &parking_lot::RwLock<Cache>,
+    last_modified: u64,
+    path_str: String,
+) -> Vec<CommentInfo> {
     let language = match path.extension()
         .and_then(|ext| ext.to_str())
         .and_then(Language::from_extension) {
             Some(lang) => lang,
-            None => return AnalysisResult {
-                path: path.clone(),
-                redundant_comments: vec![],
-                errors: vec!["Unsupported file extension".to_string()],
-            },
+            None => return vec![],
     };
 
     let mut parser = Parser::new();
-    match parser.set_language(&language.get_tree_sitter_language()) {
-        Ok(_) => (),
-        Err(e) => return AnalysisResult {
-            path: path.clone(),
-            redundant_comments: vec![],
-            errors: vec![format!("Error loading language grammar: {}", e)],
-        },
+    if parser.set_language(&language.get_tree_sitter_language()).is_err() {
+        return vec![];
     }
 
     let source_code = match std::fs::read_to_string(path) {
         Ok(code) => code,
-        Err(e) => return AnalysisResult {
-            path: path.clone(),
-            redundant_comments: vec![],
-            errors: vec![format!("Error reading file: {}", e)],
-        },
+        Err(_) => return vec![],
     };
 
     let tree = match parser.parse(&source_code, None) {
         Some(tree) => tree,
-        None => return AnalysisResult {
-            path: path.clone(),
-            redundant_comments: vec![],
-            errors: vec!["Error parsing file".to_string()],
-        },
+        None => return vec![],
     };
 
     if tree.root_node().has_error() {
-        return AnalysisResult {
-            path: path.clone(),
-            redundant_comments: vec![],
-            errors: vec!["Syntax errors found in file".to_string()],
-        };
+        return vec![];
     }
 
     let comments = detect_comments(tree.root_node(), &source_code);
-    
-    if comments.is_empty() {
-        return AnalysisResult {
-            path: path.clone(),
-            redundant_comments: vec![],
-            errors: vec![],
-        };
-    }
+    let redundant_comments = analyze_comments(comments).unwrap_or_default();
 
-    let redundant_comments = match analyze_comments(comments) {
-        Ok(comments) => comments,
-        Err(e) => return AnalysisResult {
-            path: path.clone(),
-            redundant_comments: vec![],
-            errors: vec![format!("Error analyzing comments: {}", e)],
-        },
-    };
-
-    if fix && !redundant_comments.is_empty() {
-        let updated_source = remove_redundant_comments(&source_code, &redundant_comments);
-        if let Err(e) = std::fs::write(path, updated_source) {
-            return AnalysisResult {
-                path: path.clone(),
-                redundant_comments,
-                errors: vec![format!("Error writing updated file: {}", e)],
-            };
-        }
-    }
-
-    // Update cache with write lock
+    // Update cache with results
     let mut cache_write = cache.write();
     cache_write.entries.insert(
         path_str,
@@ -282,14 +259,8 @@ fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock<Cache>) -
         },
     );
 
-    // Add debug logging to track cache operations
     debug!("Cached results for {}: {} comments", path.display(), redundant_comments.len());
-
-    AnalysisResult {
-        path: path.clone(),
-        redundant_comments,
-        errors: vec![],
-    }
+    redundant_comments
 }
 
 fn print_summary(results: &[AnalysisResult], json_output: bool) {
@@ -580,5 +551,50 @@ mod tests {
             result2.redundant_comments.len(),
             "Results should differ after file modification"
         );
+    }
+
+    #[test]
+    fn test_fix_command_uncached() {
+        let (temporary_directory, _cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.py");
+        let initial_content = "# This is a test file\ndef calculate_sum(a, b):\n    # Adds two numbers together\n    return a + b";
+        fs::write(&test_file, initial_content).unwrap();
+
+        let result = analyze_file(&test_file, true, &cache);
+        
+        let updated_content = fs::read_to_string(&test_file).unwrap();
+        assert_ne!(initial_content, updated_content, "Fix command should modify the file");
+        assert!(!updated_content.contains("# This is a test file"), "Redundant comment should be removed");
+        assert!(!updated_content.contains("# Adds two numbers together"), "Redundant comment should be removed");
+        assert!(!result.redundant_comments.is_empty(), "Should identify redundant comments");
+    }
+
+    #[test]
+    fn test_fix_command_cached() {
+        let (temporary_directory, cache_path) = setup_test_cache();
+        let cache = Arc::new(parking_lot::RwLock::new(Cache {
+            entries: HashMap::new(),
+        }));
+
+        let test_file = temporary_directory.path().join("test.py");
+        let initial_content = "# Another test comment\ndef calculate_sum(a, b):\n    # Performs addition\n    return a + b";
+        fs::write(&test_file, initial_content).unwrap();
+
+        let result1 = analyze_file(&test_file, false, &cache);
+        cache.write().save_to_path(&cache_path);
+        assert!(!result1.redundant_comments.is_empty(), "Should find redundant comments");
+
+        let cache2 = Arc::new(parking_lot::RwLock::new(Cache::load_from_path(&cache_path)));
+        let result2 = analyze_file(&test_file, true, &cache2);
+
+        let final_content = fs::read_to_string(&test_file).unwrap();
+        assert_ne!(initial_content, final_content, "Fix command should work with cached results");
+        assert!(!final_content.contains("# Another test comment"), "Redundant comment should be removed");
+        assert!(!final_content.contains("# Performs addition"), "Redundant comment should be removed");
+        assert!(!result2.redundant_comments.is_empty(), "Should find redundant comments from cache");
     }
 }

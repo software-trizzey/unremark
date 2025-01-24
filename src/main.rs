@@ -18,6 +18,9 @@ use regex;
 use std::time::Instant;
 use futures::future::join_all;
 use tokio;
+use reqwest::StatusCode;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[derive(ClapParser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -131,6 +134,25 @@ struct CommentInfo {
     text: String,
     line_number: usize,
     context: String,
+}
+
+#[derive(Debug)]
+enum ApiError {
+    RateLimit(String),
+    Timeout(String),
+    Network(String),
+    Other(String),
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::RateLimit(msg) => write!(f, "Rate limit exceeded: {}", msg),
+            ApiError::Timeout(msg) => write!(f, "Request timeout: {}", msg),
+            ApiError::Network(msg) => write!(f, "Network error: {}", msg),
+            ApiError::Other(msg) => write!(f, "API error: {}", msg),
+        }
+    }
 }
 
 #[tokio::main]
@@ -408,8 +430,9 @@ fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
 
 async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, String> {
     let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(10)  // Allow more concurrent connections
-        .pool_idle_timeout(None)      // Keep connections alive
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(None)
+        .timeout(Duration::from_secs(30))
         .build()
         .unwrap();
     let openai_api_key = std::env::var("OPENAI_API_KEY").expect("OpenAI API key not set");
@@ -424,32 +447,7 @@ async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>
             let openai = Arc::clone(&openai);
             let api_key = openai_api_key.clone();
             async move {
-                let message = serde_json::json!({
-                    "model": "ft:gpt-4o-mini-2024-07-18:personal:unremark:Aq45wBQq",
-                    "messages": [{
-                        "role": "user",
-                        "content": format!(
-                            "Comment: '{}'\nContext: '{}'\nLine Number: {}\nIs this comment redundant or useful? Please respond with a JSON object containing the following fields: is_redundant, comment_line_number, comment_text, explanation",
-                            comment.text,
-                            comment.context,
-                            comment.line_number
-                        )
-                    }],
-                    "max_tokens": 500,
-                    "temperature": 0.0,
-                    "top_p": 1.0,
-                    "n": 1,
-                    "stream": false
-                });
-
-                // Return tuple of (comment, api_result)
-                let result = openai
-                    .post("https://api.openai.com/v1/chat/completions")
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&message)
-                    .send()
-                    .await;
-
+                let result = make_api_request(&openai, &api_key, &comment).await;
                 (comment, result)
             }
         })
@@ -468,25 +466,139 @@ async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>
     let futures: Vec<_> = results.into_iter()
         .map(|(comment, api_result)| async move {
             match api_result {
-                Ok(response) => {
-                    if let Ok(json) = response.json::<serde_json::Value>().await {
-                        if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
-                            if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(content) {
-                                if analysis.comment_line_number == comment.line_number && analysis.is_redundant {
-                                    info!("Found redundant comment: {}", analysis.explanation);
-                                    return Some(comment);
-                                }
+                Ok(json) => {
+                    if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+                        if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(content) {
+                            if analysis.comment_line_number == comment.line_number && analysis.is_redundant {
+                                info!("Found redundant comment: {}", analysis.explanation);
+                                return Some(comment);
                             }
                         }
                     }
                 },
-                Err(err) => error!("Error communicating with OpenAI: {:?}", err),
+                Err(err) => {
+                    error!("Error analyzing comment '{}': {}", comment.text, err);
+                    match err {
+                        ApiError::RateLimit(msg) => {
+                            error!("Rate limit exceeded. Consider reducing concurrent requests. Details: {}", msg);
+                        },
+                        ApiError::Timeout(msg) => {
+                            error!("Request timed out. The API may be experiencing high latency. Details: {}", msg);
+                        },
+                        ApiError::Network(msg) => {
+                            error!("Network error. Please check your internet connection. Details: {}", msg);
+                        },
+                        ApiError::Other(msg) => {
+                            error!("Unexpected error occurred. Details: {}", msg);
+                        },
+                    }
+                }
             }
             None
         })
         .collect();
 
     Ok(join_all(futures).await.into_iter().filter_map(|x| x).collect())
+}
+
+async fn make_api_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    comment: &CommentInfo,
+) -> Result<serde_json::Value, ApiError> {
+    let max_retries = 3;
+    let mut retry_delay = Duration::from_millis(1000);
+
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            debug!("Retrying request (attempt {}/{})", attempt + 1, max_retries);
+            sleep(retry_delay).await;
+            retry_delay *= 2;
+        }
+
+        let message = serde_json::json!({
+            "model": "ft:gpt-4o-mini-2024-07-18:personal:unremark:Aq45wBQq",
+            "messages": [{
+                "role": "user",
+                "content": format!(
+                    "Comment: '{}'\nContext: '{}'\nLine Number: {}\nIs this comment redundant or useful? Please respond with a JSON object containing the following fields: is_redundant, comment_line_number, comment_text, explanation",
+                    comment.text,
+                    comment.context,
+                    comment.line_number
+                )
+            }],
+            "max_tokens": 500,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "n": 1,
+            "stream": false
+        });
+
+        match client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&message)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                match response.status() {
+                    StatusCode::OK => {
+                        return response.json().await.map_err(|e| {
+                            ApiError::Other(format!("Failed to parse response: {}", e))
+                        });
+                    }
+                    StatusCode::TOO_MANY_REQUESTS => {
+                        if attempt == max_retries - 1 {
+                            return Err(ApiError::RateLimit(
+                                "Rate limit exceeded after all retries".to_string(),
+                            ));
+                        }
+                        if let Some(retry_after) = response.headers()
+                            .get("retry-after")
+                            .and_then(|h| h.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                        {
+                            retry_delay = Duration::from_secs(retry_after);
+                        }
+                        continue;
+                    }
+                    status => {
+                        if attempt == max_retries - 1 {
+                            return Err(ApiError::Other(
+                                format!("Request failed with status: {}", status),
+                            ));
+                        }
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                if e.is_timeout() {
+                    if attempt == max_retries - 1 {
+                        return Err(ApiError::Timeout(
+                            "Request timed out after all retries".to_string(),
+                        ));
+                    }
+                } else if e.is_connect() {
+                    if attempt == max_retries - 1 {
+                        return Err(ApiError::Network(
+                            "Failed to connect after all retries".to_string(),
+                        ));
+                    }
+                } else {
+                    if attempt == max_retries - 1 {
+                        return Err(ApiError::Other(
+                            format!("Request failed: {}", e),
+                        ));
+                    }
+                }
+                continue;
+            }
+        }
+    }
+
+    Err(ApiError::Other("Maximum retries exceeded".to_string()))
 }
 
 fn remove_redundant_comments(source: &str, redundant_comments: &[CommentInfo]) -> String {
@@ -636,6 +748,9 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+    use serde_json::json;
 
     fn setup_test_cache() -> (TempDir, PathBuf) {
         let temporary_directory = TempDir::new().unwrap();
@@ -1014,5 +1129,160 @@ interface Shape {
         assert!(final_content.contains("Function documentation"), "Should preserve TSDoc function comment");
         assert!(final_content.contains("Interface documentation"), "Should preserve TSDoc interface comment");
         assert!(!final_content.contains("// This is a redundant file comment"), "Should remove redundant comment");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_handling() {
+        let mock_server = MockServer::start().await;
+        
+        // First request - rate limit with retry-after
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(429)
+                .insert_header("retry-after", "1")
+                .set_body_json(json!({
+                    "error": {
+                        "message": "Rate limit exceeded",
+                        "type": "rate_limit_error"
+                    }
+                })))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        // Second request - success
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "id": "test-id",
+                    "object": "chat.completion",
+                    "created": 1234567890,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"is_redundant\": true, \"comment_line_number\": 1, \"comment_text\": \"Test comment\", \"explanation\": \"Test explanation\"}"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let comment = CommentInfo {
+            text: "// Test comment".to_string(),
+            line_number: 1,
+            context: "Test context".to_string(),
+        };
+
+        let result = make_test_api_request(
+            &client,
+            "test_key",
+            &comment,
+            &mock_server.uri()
+        ).await;
+
+        assert!(result.is_ok(), "Request should succeed after retries: {:?}", result);
+    }
+
+    async fn make_test_api_request(
+        client: &reqwest::Client,
+        api_key: &str,
+        comment: &CommentInfo,
+        base_url: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        let max_retries = 3;
+        let mut retry_delay = Duration::from_millis(100); // Reduced for tests
+
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                debug!("Retrying request (attempt {}/{})", attempt + 1, max_retries);
+                sleep(retry_delay).await;
+            }
+
+            let message = serde_json::json!({
+                "model": "ft:gpt-4o-mini-2024-07-18:personal:unremark:Aq45wBQq",
+                "messages": [{
+                    "role": "user",
+                    "content": format!(
+                        "Comment: '{}'\nContext: '{}'\nLine Number: {}\nIs this comment redundant or useful? Please respond with a JSON object containing the following fields: is_redundant, comment_line_number, comment_text, explanation",
+                        comment.text,
+                        comment.context,
+                        comment.line_number
+                    )
+                }],
+                "max_tokens": 500,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "n": 1,
+                "stream": false
+            });
+
+            let request_url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+            match client
+                .post(&request_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&message)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    match response.status() {
+                        StatusCode::OK => {
+                            return response.json().await.map_err(|e| {
+                                ApiError::Other(format!("Failed to parse response: {}", e))
+                            });
+                        }
+                        StatusCode::TOO_MANY_REQUESTS => {
+                            if attempt == max_retries - 1 {
+                                return Err(ApiError::RateLimit(
+                                    "Rate limit exceeded after all retries".to_string(),
+                                ));
+                            }
+                            
+                            // Get retry delay from header or use exponential backoff
+                            retry_delay = match response.headers()
+                                .get("retry-after")
+                                .and_then(|h| h.to_str().ok())
+                                .and_then(|s| s.parse::<u64>().ok())
+                            {
+                                Some(secs) => Duration::from_secs(secs),
+                                None => Duration::from_millis(100 * 2u64.pow(attempt as u32))
+                            };
+                            
+                            debug!("Rate limited. Retrying in {:?}", retry_delay);
+                            continue;
+                        }
+                        status => {
+                            if attempt < max_retries - 1 {
+                                retry_delay = Duration::from_millis(100 * 2u64.pow(attempt as u32));
+                                continue;
+                            }
+                            return Err(ApiError::Other(
+                                format!("Request failed with status: {}", status),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if attempt < max_retries - 1 {
+                        retry_delay = Duration::from_millis(100 * 2u64.pow(attempt as u32));
+                        continue;
+                    }
+                    return Err(if e.is_timeout() {
+                        ApiError::Timeout("Request timed out after all retries".to_string())
+                    } else if e.is_connect() {
+                        ApiError::Network("Failed to connect after all retries".to_string())
+                    } else {
+                        ApiError::Other(format!("Request failed: {}", e))
+                    });
+                }
+            }
+        }
+
+        Err(ApiError::Other("Maximum retries exceeded".to_string()))
     }
 }

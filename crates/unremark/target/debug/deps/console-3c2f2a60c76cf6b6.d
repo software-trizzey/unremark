@@ -1,0 +1,11 @@
+/Users/tristandeane/Projects/rust/unremark/target/debug/deps/libconsole-3c2f2a60c76cf6b6.rmeta: /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/lib.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/common_term.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/kb.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/term.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/unix_term.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/utils.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/ansi.rs
+
+/Users/tristandeane/Projects/rust/unremark/target/debug/deps/console-3c2f2a60c76cf6b6.d: /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/lib.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/common_term.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/kb.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/term.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/unix_term.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/utils.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/ansi.rs
+
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/lib.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/common_term.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/kb.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/term.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/unix_term.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/utils.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console-0.15.10/src/ansi.rs:

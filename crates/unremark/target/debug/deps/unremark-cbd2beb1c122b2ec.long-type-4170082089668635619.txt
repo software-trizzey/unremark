@@ -1,0 +1,2 @@
+rayon::iter::Map<rayon::slice::Iter<'_, std::path::PathBuf>, {closure@src/main.rs:173:18: 173:24}>
+rayon::iter::map::Map<rayon::slice::Iter<'_, path::PathBuf>, {closure@src/main.rs:173:18: 173:24}>

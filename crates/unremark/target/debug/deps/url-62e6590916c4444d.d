@@ -1,0 +1,11 @@
+/Users/tristandeane/Projects/rust/unremark/target/debug/deps/liburl-62e6590916c4444d.rmeta: /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/lib.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/host.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/origin.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/parser.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/path_segments.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/slicing.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/quirks.rs
+
+/Users/tristandeane/Projects/rust/unremark/target/debug/deps/url-62e6590916c4444d.d: /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/lib.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/host.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/origin.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/parser.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/path_segments.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/slicing.rs /Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/quirks.rs
+
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/lib.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/host.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/origin.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/parser.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/path_segments.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/slicing.rs:
+/Users/tristandeane/.cargo/registry/src/index.crates.io-6f17d22bba15001f/url-2.5.4/src/quirks.rs:

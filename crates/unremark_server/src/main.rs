@@ -1,12 +1,10 @@
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use unremark::{Language, Cache, analyze_source};
+use unremark::{Language, Cache, analyze_text_content};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use dashmap::DashMap;
-use std::path::PathBuf;
-use tokio::runtime::Runtime;
 
 #[derive(Debug, Clone)]
 struct UnremarkLanguageServer {
@@ -18,6 +16,7 @@ struct UnremarkLanguageServer {
 #[tower_lsp::async_trait]
 impl LanguageServer for UnremarkLanguageServer {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        self.client.log_message(MessageType::INFO, "Initializing server").await;
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -39,10 +38,11 @@ impl LanguageServer for UnremarkLanguageServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "unremark server initialized").await;
+        self.client.log_message(MessageType::INFO, "Server initialized").await;
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        self.client.log_message(MessageType::INFO, "Detected document open").await;
         self.document_map.insert(
             params.text_document.uri.to_string(),
             params.text_document.text,
@@ -51,6 +51,7 @@ impl LanguageServer for UnremarkLanguageServer {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        self.client.log_message(MessageType::INFO, "Detected document change").await;
         if let Some(change) = params.content_changes.first() {
             self.document_map.insert(
                 params.text_document.uri.to_string(),
@@ -61,6 +62,7 @@ impl LanguageServer for UnremarkLanguageServer {
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<Vec<CodeActionOrCommand>>> {
+        self.client.log_message(MessageType::INFO, "Remove comment requested...").await;
         let mut actions = Vec::new();
         
         for diagnostic in params.context.diagnostics {
@@ -88,6 +90,7 @@ impl LanguageServer for UnremarkLanguageServer {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        self.client.log_message(MessageType::INFO, "Shutting down server").await;
         Ok(())
     }
 }
@@ -101,17 +104,17 @@ impl UnremarkLanguageServer {
                 .and_then(Language::from_extension);
 
             if let Some(language) = ext {
-                let analysis = analyze_source(text.as_str(), &PathBuf::from(uri.path())).await;
+                let analysis = analyze_text_content(text.as_str(), language).await;
                 let diagnostics: Vec<Diagnostic> = analysis.redundant_comments
                     .into_iter()
                     .map(|comment| Diagnostic {
                         range: Range {
                             start: Position {
-                                line: comment.line_number as u32,
-                                character: 0, // Start at beginning of line for now
+                                line: comment.line_number as u32 - 1, // LSP uses 0-based line numbers
+                                character: 0,
                             },
                             end: Position {
-                                line: comment.line_number as u32,
+                                line: comment.line_number as u32 - 1,
                                 character: comment.text.len() as u32,
                             },
                         },
@@ -153,7 +156,8 @@ mod tests {
     use tower_lsp::LanguageServer;
     use std::sync::Arc;
     use futures::executor::block_on;
-
+    use tokio::runtime::Runtime;
+    
     fn create_test_server() -> UnremarkLanguageServer {
         let (service, _socket) = LspService::build(|client| UnremarkLanguageServer {
             client,

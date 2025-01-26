@@ -12,7 +12,7 @@ pub use crate::types::{
     Cache,
     CacheEntry,
 };
-pub use crate::analysis::{analyze_file, analyze_comments, analyze_source};
+pub use crate::analysis::{analyze_file, analyze_comments, analyze_text_content};
 pub use crate::utils::{find_context, remove_redundant_comments};
 
 // Internal modules

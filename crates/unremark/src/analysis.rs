@@ -241,6 +241,43 @@ pub async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentI
     Ok(join_all(futures).await.into_iter().filter_map(|x| x).collect())
 }
 
+pub async fn analyze_text_content(source_code: &str, language: Language) -> AnalysisResult {
+    let mut parser = Parser::new();
+    if parser.set_language(&language.get_tree_sitter_language()).is_err() {
+        return AnalysisResult {
+            path: PathBuf::new(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
+    }
+
+    let tree = match parser.parse(source_code, None) {
+        Some(tree) => tree,
+        None => return AnalysisResult {
+            path: PathBuf::new(),
+            redundant_comments: vec![],
+            errors: vec![],
+        },
+    };
+
+    if tree.root_node().has_error() {
+        return AnalysisResult {
+            path: PathBuf::new(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
+    }
+
+    let comments = detect_comments(tree.root_node(), source_code);
+    let redundant_comments = analyze_comments(comments).await.unwrap_or_default();
+
+    AnalysisResult {
+        path: PathBuf::new(),
+        redundant_comments,
+        errors: vec![],
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

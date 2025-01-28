@@ -5,6 +5,10 @@ use unremark::{Language, Cache, analyze_text_content};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use dashmap::DashMap;
+use serde_json::Value;
+
+const VERSION_COMMAND: &str = "unremark.version";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone)]
 struct UnremarkLanguageServer {
@@ -31,6 +35,10 @@ impl LanguageServer for UnremarkLanguageServer {
                     }
                 )),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![VERSION_COMMAND.to_string()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -93,6 +101,15 @@ impl LanguageServer for UnremarkLanguageServer {
         self.client.log_message(MessageType::INFO, "Shutting down server").await;
         Ok(())
     }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
+        match params.command.as_str() {
+            VERSION_COMMAND => {
+                Ok(Some(serde_json::to_value(VERSION).unwrap()))
+            }
+            _ => Ok(None)
+        }
+    }
 }
 
 impl UnremarkLanguageServer {
@@ -147,7 +164,9 @@ async fn main() {
         cache: Arc::new(RwLock::new(Cache::load())),
     });
 
-    Server::new(stdin, stdout, socket).serve(service).await;
+    Server::new(stdin, stdout, socket)
+        .serve(service)
+        .await;
 }
 
 #[cfg(test)]
@@ -197,6 +216,12 @@ mod tests {
             capabilities.code_action_provider,
             Some(CodeActionProviderCapability::Simple(true))
         ));
+
+        // Check execute command provider
+        assert!(capabilities.execute_command_provider.is_some());
+        if let Some(ExecuteCommandOptions { commands, .. }) = capabilities.execute_command_provider {
+            assert_eq!(commands, vec![VERSION_COMMAND.to_string()]);
+        }
     }
 
     #[test]

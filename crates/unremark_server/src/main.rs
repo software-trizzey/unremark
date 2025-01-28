@@ -10,6 +10,12 @@ use serde_json::Value;
 const VERSION_COMMAND: &str = "unremark.version";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// Add this struct to define our custom initialization options
+#[derive(Debug, Default, serde::Deserialize)]
+struct UnremarkInitializeParams {
+    openai_api_key: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct UnremarkLanguageServer {
     client: Client,
@@ -19,7 +25,16 @@ struct UnremarkLanguageServer {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for UnremarkLanguageServer {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Extract our custom initialization options
+        if let Some(options) = params.initialization_options {
+            if let Ok(unremark_options) = serde_json::from_value::<UnremarkInitializeParams>(options) {
+                if let Some(api_key) = unremark_options.openai_api_key {
+                    std::env::set_var("OPENAI_API_KEY", api_key);
+                }
+            }
+        }
+
         self.client.log_message(MessageType::INFO, "Initializing server").await;
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -153,7 +168,11 @@ impl UnremarkLanguageServer {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("info")
+    )
+    .init();
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();

@@ -1,7 +1,14 @@
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use unremark::{Language, Cache, analyze_text_content};
+use unremark::{
+    analyze_comments, 
+    detect_comments, 
+    Cache, 
+    Language,
+    AnalysisService,
+    create_analysis_service,
+};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use dashmap::DashMap;
@@ -136,8 +143,15 @@ impl UnremarkLanguageServer {
                 .and_then(Language::from_extension);
 
             if let Some(language) = ext {
-                let analysis = analyze_text_content(text.as_str(), language).await;
-                let diagnostics: Vec<Diagnostic> = analysis.redundant_comments
+                let comments = detect_comments(text.as_str(), language).unwrap_or_default();
+
+                let redundant_comments = if std::env::var("OPENAI_API_KEY").is_ok() {
+                    analyze_comments(comments).await.unwrap_or_default()
+                } else {
+                    create_analysis_service(None).analyze_comments_with_proxy(comments).await.unwrap_or_default()
+                };
+
+                let diagnostics: Vec<Diagnostic> = redundant_comments
                     .into_iter()
                     .map(|comment| Diagnostic {
                         range: Range {

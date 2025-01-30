@@ -1,12 +1,13 @@
 use crate::types::{ApiError, CommentInfo, CommentAnalysis, AnalysisResult, Language, Cache, CacheEntry};
 use crate::api::make_api_request;
-use crate::utils::{find_context, remove_redundant_comments};
+use crate::comment_detection::detect_comments;
+use crate::utils::remove_redundant_comments;
 use std::path::PathBuf;
 use std::fs;
 use std::sync::Arc;
 use futures::future::join_all;
 use std::time::{Duration, Instant};
-use tree_sitter::{Node, Parser};
+use tree_sitter::Parser;
 use log::{debug, error, info};
 use std::time::SystemTime;
 use parking_lot;
@@ -121,7 +122,7 @@ pub async fn analyze_source(source_code: &str, path: &PathBuf) -> AnalysisResult
         };
     }
 
-    let comments = detect_comments(tree.root_node(), source_code);
+    let comments = detect_comments(source_code, language).unwrap_or_default();
     let redundant_comments = analyze_comments(comments).await.unwrap_or_default();
 
     AnalysisResult {
@@ -129,43 +130,6 @@ pub async fn analyze_source(source_code: &str, path: &PathBuf) -> AnalysisResult
         redundant_comments,
         errors: vec![],
     }
-}
-
-pub fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
-    let mut comments = Vec::new();
-    let mut cursor = node.walk();
-
-    for child in node.children(&mut cursor) {
-        debug!("Node kind: {} at line {}", child.kind(), child.start_position().row + 1);
-        if child.kind().contains("comment") {
-            let comment_text = code[child.byte_range()].trim().to_string();
-            
-            // Skip documentation comments for all supported languages
-            if comment_text.starts_with("///") ||    // Rust doc comments
-               comment_text.starts_with("//!") ||    // Rust module doc comments
-               comment_text.starts_with("/**") ||    // JSDoc/TSDoc/Rust block doc comments
-               comment_text.starts_with("/*!")  ||   // Rust module block doc comments
-               comment_text.starts_with("\"\"\"") || // Python docstrings
-               comment_text.starts_with("'''") {     // Python docstrings (alternative)
-                debug!("Skipping doc comment: {}", comment_text);
-                continue;
-            }
-
-            let line_number = child.start_position().row + 1;
-            let context = find_context(child, code);
-
-            debug!("Found comment: '{}' of type '{}' on line {}", 
-                comment_text, child.kind(), line_number);
-
-            comments.push(CommentInfo {
-                text: comment_text,
-                line_number,
-                context,
-            });
-        }
-        comments.extend(detect_comments(child, code));
-    }
-    comments
 }
 
 pub async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, String> {
@@ -241,7 +205,8 @@ pub async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentI
     Ok(join_all(futures).await.into_iter().filter_map(|x| x).collect())
 }
 
-pub async fn analyze_text_content(source_code: &str, language: Language) -> AnalysisResult {
+// Note: this is used by the LSP server to analyze the current file
+pub async fn analyze_current_file(source_code: &str, language: Language) -> AnalysisResult {
     let mut parser = Parser::new();
     if parser.set_language(&language.get_tree_sitter_language()).is_err() {
         return AnalysisResult {
@@ -268,7 +233,7 @@ pub async fn analyze_text_content(source_code: &str, language: Language) -> Anal
         };
     }
 
-    let comments = detect_comments(tree.root_node(), source_code);
+    let comments = detect_comments(source_code, language).unwrap_or_default();
     let redundant_comments = analyze_comments(comments).await.unwrap_or_default();
 
     AnalysisResult {
@@ -281,9 +246,11 @@ pub async fn analyze_text_content(source_code: &str, language: Language) -> Anal
 
 #[cfg(test)]
 mod tests {
-    use crate::{get_cache_path, ApiError, CACHE_FILE_NAME};
-
     use super::*;
+    use crate::types::ApiError;
+    use crate::constants::CACHE_FILE_NAME;
+    use crate::utils::get_cache_path;
+    
     use std::collections::HashMap;
     use std::fs;
     use reqwest::StatusCode;

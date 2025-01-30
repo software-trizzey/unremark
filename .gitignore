@@ -3,6 +3,7 @@
 
 .env
 .DS_Store
+.ruff_cache
 
 # Misc
 training.jsonl

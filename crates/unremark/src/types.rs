@@ -83,11 +83,11 @@ impl Cache {
     }
 
     pub fn load() -> Self {
-        Self::load_from_path(&crate::get_cache_path())
+        Self::load_from_path(&crate::utils::get_cache_path())
     }
 
     pub fn save(&self) {
-        self.save_to_path(&crate::get_cache_path())
+        self.save_to_path(&crate::utils::get_cache_path())
     }
 }
 

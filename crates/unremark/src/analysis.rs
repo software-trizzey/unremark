@@ -1,12 +1,13 @@
 use crate::types::{ApiError, CommentInfo, CommentAnalysis, AnalysisResult, Language, Cache, CacheEntry};
 use crate::api::make_api_request;
-use crate::utils::{find_context, remove_redundant_comments};
+use crate::comment_detection::detect_comments;
+use crate::utils::remove_redundant_comments;
 use std::path::PathBuf;
 use std::fs;
 use std::sync::Arc;
 use futures::future::join_all;
 use std::time::{Duration, Instant};
-use tree_sitter::{Node, Parser};
+use tree_sitter::Parser;
 use log::{debug, error, info};
 use std::time::SystemTime;
 use parking_lot;
@@ -23,34 +24,56 @@ pub async fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    debug!("Analyzing file: {}", path.display());
-    debug!("Last modified: {}", last_modified);
+    let source_code = match std::fs::read_to_string(path) {
+        Ok(code) => code,
+        Err(_) => return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![],
+        },
+    };
 
+    // Check cache first
     let redundant_comments = {
         let cache_read = cache.read();
         if let Some(entry) = cache_read.entries.get(&path_str) {
-            debug!("Found cache entry with last_modified: {}", entry.last_modified);
             if entry.last_modified == last_modified {
-                debug!("Using cached results for {}", path.display());
                 entry.redundant_comments.clone()
             } else {
-                debug!("Cache outdated, analyzing file");
                 drop(cache_read);
-                analyze_and_cache_file(path, cache, last_modified, path_str).await
+                let analysis = analyze_source(&source_code, path).await;
+                // Update cache
+                let mut cache_write = cache.write();
+                cache_write.entries.insert(
+                    path_str,
+                    CacheEntry {
+                        last_modified,
+                        redundant_comments: analysis.redundant_comments.clone(),
+                    },
+                );
+                analysis.redundant_comments
             }
         } else {
-            debug!("No cache entry found, analyzing file");
             drop(cache_read);
-            analyze_and_cache_file(path, cache, last_modified, path_str).await
+            let analysis = analyze_source(&source_code, path).await;
+            // Update cache
+            let mut cache_write = cache.write();
+            cache_write.entries.insert(
+                path_str,
+                CacheEntry {
+                    last_modified,
+                    redundant_comments: analysis.redundant_comments.clone(),
+                },
+            );
+            analysis.redundant_comments
         }
     };
 
+    // Apply fixes if requested
     if fix && !redundant_comments.is_empty() {
-        if let Ok(source) = std::fs::read_to_string(path) {
-            let updated_source = remove_redundant_comments(&source, &redundant_comments);
-            if let Err(e) = std::fs::write(path, updated_source) {
-                error!("Failed to write changes to {}: {}", path.display(), e);
-            }
+        let updated_source = remove_redundant_comments(&source_code, &redundant_comments);
+        if let Err(e) = std::fs::write(path, updated_source) {
+            error!("Failed to write changes to {}: {}", path.display(), e);
         }
     }
 
@@ -61,90 +84,52 @@ pub async fn analyze_file(path: &PathBuf, fix: bool, cache: &parking_lot::RwLock
     }
 }
 
-async fn analyze_and_cache_file(
-    path: &PathBuf,
-    cache: &parking_lot::RwLock<Cache>,
-    last_modified: u64,
-    path_str: String,
-) -> Vec<CommentInfo> {
+pub async fn analyze_source(source_code: &str, path: &PathBuf) -> AnalysisResult {
     let language = match path.extension()
         .and_then(|ext| ext.to_str())
         .and_then(Language::from_extension) {
             Some(lang) => lang,
-            None => return vec![],
+            None => return AnalysisResult {
+                path: path.clone(),
+                redundant_comments: vec![],
+                errors: vec![],
+            },
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&language.get_tree_sitter_language()).is_err() {
-        return vec![];
+        return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
     }
 
-    let source_code = match std::fs::read_to_string(path) {
-        Ok(code) => code,
-        Err(_) => return vec![],
-    };
-
-    let tree = match parser.parse(&source_code, None) {
+    let tree = match parser.parse(source_code, None) {
         Some(tree) => tree,
-        None => return vec![],
+        None => return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![],
+        },
     };
 
     if tree.root_node().has_error() {
-        return vec![];
+        return AnalysisResult {
+            path: path.clone(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
     }
 
-    let comments = detect_comments(tree.root_node(), &source_code);
+    let comments = detect_comments(source_code, language).unwrap_or_default();
     let redundant_comments = analyze_comments(comments).await.unwrap_or_default();
 
-    // Update cache with results
-    let mut cache_write = cache.write();
-    cache_write.entries.insert(
-        path_str,
-        CacheEntry {
-            last_modified,
-            redundant_comments: redundant_comments.clone(),
-        },
-    );
-
-    debug!("Cached results for {}: {} comments", path.display(), redundant_comments.len());
-    redundant_comments
-}
-
-pub fn detect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
-    let mut comments = Vec::new();
-    let mut cursor = node.walk();
-
-    for child in node.children(&mut cursor) {
-        debug!("Node kind: {} at line {}", child.kind(), child.start_position().row + 1);
-        if child.kind().contains("comment") {
-            let comment_text = code[child.byte_range()].trim().to_string();
-            
-            // Skip documentation comments for all supported languages
-            if comment_text.starts_with("///") ||    // Rust doc comments
-               comment_text.starts_with("//!") ||    // Rust module doc comments
-               comment_text.starts_with("/**") ||    // JSDoc/TSDoc/Rust block doc comments
-               comment_text.starts_with("/*!")  ||   // Rust module block doc comments
-               comment_text.starts_with("\"\"\"") || // Python docstrings
-               comment_text.starts_with("'''") {     // Python docstrings (alternative)
-                debug!("Skipping doc comment: {}", comment_text);
-                continue;
-            }
-
-            let line_number = child.start_position().row + 1;
-            let context = find_context(child, code);
-
-            debug!("Found comment: '{}' of type '{}' on line {}", 
-                comment_text, child.kind(), line_number);
-
-            comments.push(CommentInfo {
-                text: comment_text,
-                line_number,
-                context,
-            });
-        }
-        comments.extend(detect_comments(child, code));
+    AnalysisResult {
+        path: path.clone(),
+        redundant_comments,
+        errors: vec![],
     }
-    comments
 }
 
 pub async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentInfo>, String> {
@@ -220,12 +205,52 @@ pub async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentI
     Ok(join_all(futures).await.into_iter().filter_map(|x| x).collect())
 }
 
+// Note: this is used by the LSP server to analyze the current file
+pub async fn analyze_current_file(source_code: &str, language: Language) -> AnalysisResult {
+    let mut parser = Parser::new();
+    if parser.set_language(&language.get_tree_sitter_language()).is_err() {
+        return AnalysisResult {
+            path: PathBuf::new(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
+    }
+
+    let tree = match parser.parse(source_code, None) {
+        Some(tree) => tree,
+        None => return AnalysisResult {
+            path: PathBuf::new(),
+            redundant_comments: vec![],
+            errors: vec![],
+        },
+    };
+
+    if tree.root_node().has_error() {
+        return AnalysisResult {
+            path: PathBuf::new(),
+            redundant_comments: vec![],
+            errors: vec![],
+        };
+    }
+
+    let comments = detect_comments(source_code, language).unwrap_or_default();
+    let redundant_comments = analyze_comments(comments).await.unwrap_or_default();
+
+    AnalysisResult {
+        path: PathBuf::new(),
+        redundant_comments,
+        errors: vec![],
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
-    use crate::{get_cache_path, ApiError, CACHE_FILE_NAME};
-
     use super::*;
+    use crate::types::ApiError;
+    use crate::constants::CACHE_FILE_NAME;
+    use crate::utils::get_cache_path;
+    
     use std::collections::HashMap;
     use std::fs;
     use reqwest::StatusCode;

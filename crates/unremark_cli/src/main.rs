@@ -11,7 +11,6 @@ use std::time::Instant;
 use futures::future::join_all;
 use tokio;
 
-// Import from our library
 use unremark::{
     Language,
     AnalysisResult,

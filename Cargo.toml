@@ -1,14 +1,13 @@
 [workspace]
 members = [
     "crates/unremark",
+    "crates/unremark_cli",
     "crates/unremark_server"
 ]
 resolver = "2"
+default-members = ["crates/unremark_cli"]
 
 [workspace.dependencies]
-unremark = { path = "crates/unremark" }
-unremark_server = { path = "crates/unremark_server" }
-
 dotenv = "0.15.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

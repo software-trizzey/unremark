@@ -1,6 +1,21 @@
 use crate::types::CommentInfo;
 use tree_sitter::Node;
 use log::debug;
+use std::path::PathBuf;
+use std::fs;
+use crate::constants::CACHE_FILE_NAME;
+
+pub fn get_cache_path() -> PathBuf {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("unremark");
+    
+    debug!("Cache directory: {}", cache_dir.display());
+    fs::create_dir_all(&cache_dir).unwrap_or_default();
+    
+    cache_dir.join(CACHE_FILE_NAME)
+}
+
 
 pub fn find_context(node: Node, code: &str) -> String {
     let mut parent = node;

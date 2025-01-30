@@ -1,5 +1,5 @@
 [package]
-name = "unremark"
+name = "unremark_cli"
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/software-trizzey/unremark"
@@ -7,25 +7,17 @@ authors = ["Tristan Deane <tristandeane93@gmail.com>"]
 license = "MIT"
 readme = "../../README.md"
 
-[lib]
+[[bin]]
 name = "unremark"
-path = "src/lib.rs"
-crate-type = ["lib","cdylib"]  # Needed for Python bindings
-
-[features]
-python = ["pyo3"]
+path = "src/main.rs"
 
 [dependencies]
-async-trait = "0.1"
-tree-sitter = "0.24.7"
-tree-sitter-rust = "0.23.0"
-tree-sitter-python = "0.23.0"
-tree-sitter-javascript = "0.23.0"
-tree-sitter-typescript = "0.23.0"
-pyo3 = { version = "0.23.4", features = ["extension-module"], optional = true }
+unremark = { path = "../unremark" }
+
 dotenv = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+clap = { workspace = true }
 walkdir = { workspace = true }
 ignore = { workspace = true }
 toml = { workspace = true }

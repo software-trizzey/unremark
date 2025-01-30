@@ -1,8 +1,3 @@
-use std::path::PathBuf;
-use std::fs;
-use log::debug;
-
-// Public exports
 pub use crate::types::{
     Language,
     CommentInfo,
@@ -12,26 +7,32 @@ pub use crate::types::{
     Cache,
     CacheEntry,
 };
-pub use crate::analysis::{analyze_file, analyze_comments, analyze_text_content};
+pub use crate::analysis::{analyze_file, analyze_comments, analyze_current_file};
 pub use crate::utils::{find_context, remove_redundant_comments};
+pub use crate::comment_detection::detect_comments;
+pub use crate::constants::{OPENAI_MODEL, CACHE_FILE_NAME, PROXY_ENDPOINT};
+pub use services::proxy::{ProxyAnalysisService, AnalysisService, create_analysis_service};
 
 // Internal modules
 mod types;
+mod constants;
 mod analysis;
 mod utils;
 mod api;
+mod comment_detection;
+mod bindings;
+mod services;
 
-// Constants
-pub const CACHE_FILE_NAME: &str = "analysis_cache.json";
 
-// Public functions
-pub fn get_cache_path() -> PathBuf {
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("unremark");
-    
-    debug!("Cache directory: {}", cache_dir.display());
-    fs::create_dir_all(&cache_dir).unwrap_or_default();
-    
-    cache_dir.join(CACHE_FILE_NAME)
+// Python bindings (only when python feature is enabled)
+#[cfg(feature = "python")]
+pub use bindings::python::{PyCommentInfo, py_analyze_comments, register_module};
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+#[cfg(feature = "python")]
+#[pymodule]
+fn unremark(py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    register_module(py, m)
 }

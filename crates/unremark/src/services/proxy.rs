@@ -11,7 +11,7 @@ struct ProxyRequest {
 
 #[derive(Debug, Deserialize)]
 struct ProxyResponse {
-    redundant_comments: Vec<CommentInfo>,
+    comments: Vec<CommentInfo>, 
 }
 
 #[async_trait]
@@ -46,7 +46,7 @@ impl AnalysisService for ProxyAnalysisService {
             .await
             .map_err(|e| format!("Failed to parse proxy response: {}", e))?;
 
-        Ok(analysis.redundant_comments)
+        Ok(analysis.comments)
     }
 }
 
@@ -72,11 +72,13 @@ mod tests {
                 text: "// Adds two numbers".to_string(),
                 line_number: 1,
                 context: "fn add(a: i32, b: i32) -> i32 { a + b }".to_string(),
+                explanation: None,
             },
             CommentInfo {
                 text: "// Returns the sum".to_string(),
                 line_number: 2,
                 context: "a + b".to_string(),
+                explanation: None,
             },
         ];
 

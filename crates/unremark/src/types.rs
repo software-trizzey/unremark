@@ -39,11 +39,12 @@ pub struct AnalysisResult {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommentInfo {
     pub text: String,
     pub line_number: usize,
     pub context: String,
+    pub explanation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

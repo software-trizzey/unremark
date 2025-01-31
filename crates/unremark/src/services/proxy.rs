@@ -31,7 +31,7 @@ impl AnalysisService for ProxyAnalysisService {
         let request = ProxyRequest { comments };
 
         let response = client
-            .post(&format!("{}/api/analyze", self.endpoint))
+            .post(&format!("{}/api/analyze/", self.endpoint))
             .json(&request)
             .send()
             .await

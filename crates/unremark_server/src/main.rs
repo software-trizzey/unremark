@@ -6,7 +6,6 @@ use unremark::{
     detect_comments, 
     Cache, 
     Language,
-    AnalysisService,
     create_analysis_service,
 };
 use std::sync::Arc;

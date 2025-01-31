@@ -2,13 +2,11 @@
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
-use crate::types::Language;
-
-#[cfg(feature = "python")]
-use crate::comment_detection::detect_comments;
+use crate::types::CommentInfo;
 
 #[cfg(feature = "python")]
 #[pyclass]
+#[derive(Clone)]
 pub struct PyCommentInfo {
     #[pyo3(get)]
     text: String,
@@ -29,14 +27,21 @@ impl PyCommentInfo {
 
 #[cfg(feature = "python")]
 #[pyfunction]
-pub fn py_analyze_comments(source_code: &str, language: &str) -> PyResult<Vec<PyCommentInfo>> {
-    let lang = Language::from_extension(language)
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Unsupported language"))?;
-    
-    let comments = detect_comments(source_code, lang)
+pub fn py_analyze_comments(comments: Vec<PyCommentInfo>) -> PyResult<Vec<PyCommentInfo>> {
+    let rust_comments = comments.into_iter()
+        .map(|c| CommentInfo {
+            text: c.text,
+            line_number: c.line_number,
+            context: c.context,
+        })
+        .collect();
+
+    let redundant_comments = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(crate::analysis::analyze_comments(rust_comments))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-    
-    Ok(comments.into_iter()
+
+    Ok(redundant_comments.into_iter()
         .map(|c| PyCommentInfo {
             text: c.text,
             line_number: c.line_number,
@@ -44,10 +49,3 @@ pub fn py_analyze_comments(source_code: &str, language: &str) -> PyResult<Vec<Py
         })
         .collect())
 }
-
-#[cfg(feature = "python")]
-pub fn register_module(py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    m.add_class::<PyCommentInfo>()?;
-    m.add_function(wrap_pyfunction!(py_analyze_comments, m)?)?;
-    Ok(())
-} 

@@ -26,13 +26,15 @@ mod services;
 
 // Python bindings (only when python feature is enabled)
 #[cfg(feature = "python")]
-pub use bindings::python::{PyCommentInfo, py_analyze_comments, register_module};
+pub use bindings::python::{py_analyze_comments, PyCommentInfo};
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
-fn unremark(py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    register_module(py, m)
+fn unremark(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyCommentInfo>()?;
+    m.add_function(wrap_pyfunction!(py_analyze_comments, m)?)?;
+    Ok(())
 }

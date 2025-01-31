@@ -15,6 +15,7 @@ use serde_json::Value;
 
 const VERSION_COMMAND: &str = "unremark.version";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const SERVER_ID: &str = "unremark";
 
 // Add this struct to define our custom initialization options
 #[derive(Debug, Default, serde::Deserialize)]
@@ -26,7 +27,8 @@ struct UnremarkInitializeParams {
 struct UnremarkLanguageServer {
     client: Client,
     document_map: DashMap<String, String>,
-    cache: Arc<RwLock<Cache>>,
+    #[allow(dead_code)]
+    cache: Arc<RwLock<Cache>>, // TODO: implement cache logic after we've prototyped the server
 }
 
 #[tower_lsp::async_trait]
@@ -49,10 +51,10 @@ impl LanguageServer for UnremarkLanguageServer {
                 )),
                 diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
                     DiagnosticOptions {
-                        identifier: Some("unremark".to_string()),
+                        identifier: Some(SERVER_ID.to_string()),
                         inter_file_dependencies: false,
                         workspace_diagnostics: false,
-                        ..Default::default()
+                        work_done_progress_options: Default::default(),
                     }
                 )),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
@@ -77,6 +79,18 @@ impl LanguageServer for UnremarkLanguageServer {
             params.text_document.text,
         );
         self.analyze_document(&params.text_document.uri).await;
+    }
+
+    async fn diagnostic(&self, _params: DocumentDiagnosticParams) -> Result<DocumentDiagnosticReportResult> {
+        Ok(DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+            RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    items: vec![],
+                    ..Default::default()
+                },
+            }
+        )))
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -238,7 +252,7 @@ mod tests {
         // Check diagnostic provider
         assert!(capabilities.diagnostic_provider.is_some());
         if let Some(DiagnosticServerCapabilities::Options(opts)) = capabilities.diagnostic_provider {
-            assert_eq!(opts.identifier, Some("unremark".to_string()));
+            assert_eq!(opts.identifier, Some(SERVER_ID.to_string()));
             assert!(!opts.inter_file_dependencies);
             assert!(!opts.workspace_diagnostics);
         }
@@ -296,5 +310,30 @@ mod tests {
             server.document_map.get(uri.as_str()).unwrap().as_str(),
             new_text
         );
+    }
+
+    #[test]
+    fn test_diagnostic() {
+        let runtime = Runtime::new().unwrap();
+        let server = create_test_server();
+        let uri = Url::parse("file:///test.rs").unwrap();
+
+        let params = DocumentDiagnosticParams {
+            text_document: TextDocumentIdentifier { uri },
+            identifier: None,
+            previous_result_id: None,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = runtime.block_on(server.diagnostic(params)).unwrap();
+        
+        match result {
+            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(report)) => {
+                assert!(report.related_documents.is_none());
+                assert!(report.full_document_diagnostic_report.items.is_empty());
+            },
+            _ => panic!("Expected full diagnostic report"),
+        }
     }
 }

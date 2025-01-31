@@ -148,7 +148,7 @@ impl UnremarkLanguageServer {
                 let redundant_comments = if std::env::var("OPENAI_API_KEY").is_ok() {
                     analyze_comments(comments).await.unwrap_or_default()
                 } else {
-                    create_analysis_service(None).analyze_comments_with_proxy(comments).await.unwrap_or_default()
+                    create_analysis_service().analyze_comments_with_proxy(comments).await.unwrap_or_default()
                 };
 
                 let diagnostics: Vec<Diagnostic> = redundant_comments

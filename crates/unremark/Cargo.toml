@@ -5,12 +5,11 @@ edition = "2021"
 repository = "https://github.com/software-trizzey/unremark"
 authors = ["Tristan Deane <tristandeane93@gmail.com>"]
 license = "MIT"
-readme = "../../README.md"
 
 [lib]
 name = "unremark"
 path = "src/lib.rs"
-crate-type = ["lib","cdylib"]  # Needed for Python bindings
+crate-type = ["rlib","cdylib"]  # Needed for Python bindings
 
 [features]
 python = ["pyo3"]

@@ -10,7 +10,7 @@ pub use crate::types::{
 pub use crate::analysis::{analyze_file, analyze_comments, analyze_current_file};
 pub use crate::utils::{find_context, remove_redundant_comments};
 pub use crate::comment_detection::detect_comments;
-pub use crate::constants::{OPENAI_MODEL, CACHE_FILE_NAME, PROXY_ENDPOINT};
+pub use crate::constants::{OPENAI_MODEL, CACHE_FILE_NAME, get_proxy_endpoint};
 pub use services::proxy::{ProxyAnalysisService, AnalysisService, create_analysis_service};
 
 // Internal modules

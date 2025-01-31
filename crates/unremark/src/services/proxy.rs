@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 use reqwest::Client;
 use crate::types::CommentInfo;
-use crate::constants::PROXY_ENDPOINT;
+use crate::constants::get_proxy_endpoint;
 
 #[derive(Debug, Serialize)]
 struct ProxyRequest {
@@ -31,7 +31,7 @@ impl AnalysisService for ProxyAnalysisService {
         let request = ProxyRequest { comments };
 
         let response = client
-            .post(&format!("{}/analyze", self.endpoint))
+            .post(&format!("{}/api/analyze", self.endpoint))
             .json(&request)
             .send()
             .await
@@ -50,12 +50,13 @@ impl AnalysisService for ProxyAnalysisService {
     }
 }
 
-pub fn create_analysis_service(proxy_endpoint: Option<String>) -> Box<dyn AnalysisService + Send + Sync> {
+pub fn create_analysis_service() -> Box<dyn AnalysisService + Send + Sync> {
     Box::new(ProxyAnalysisService {
-        endpoint: proxy_endpoint.unwrap_or_else(|| PROXY_ENDPOINT.to_string()),
+        endpoint: get_proxy_endpoint(),
     })
 }
 
+// FIXME: This should be an integration test as it depends on the proxy server
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,7 +64,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_service() {
         let service = ProxyAnalysisService {
-            endpoint: PROXY_ENDPOINT.to_string(),
+            endpoint: get_proxy_endpoint(),
         };
 
         let comments = vec![

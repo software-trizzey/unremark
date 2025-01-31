@@ -5,7 +5,6 @@ edition = "2021"
 repository = "https://github.com/software-trizzey/unremark"
 authors = ["Tristan Deane <tristandeane93@gmail.com>"]
 license = "MIT"
-readme = "../../README.md"
 
 [lib]
 name = "unremark"

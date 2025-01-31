@@ -102,13 +102,39 @@ impl LanguageServer for UnremarkLanguageServer {
             format!("Document change detected - version: {}", params.text_document.version)).await;
         
         if let Some(change) = params.content_changes.first() {
-            self.client.log_message(MessageType::INFO, 
-                format!("Updating document content for {}", params.text_document.uri)).await;
-            
-            self.document_map.insert(
-                params.text_document.uri.to_string(),
-                change.text.clone(),
-            );
+            let uri_str = params.text_document.uri.to_string();
+            let mut current_text = if let Some(text) = self.document_map.get(&uri_str) {
+                text.clone()
+            } else {
+                return;
+            };
+
+            // Apply the change to the document
+            if let Some(range) = change.range {
+                let start_pos = range.start;
+                let end_pos = range.end;
+                
+                // Convert the positions to string indices
+                let lines: Vec<&str> = current_text.lines().collect();
+                let start_idx = lines[..start_pos.line as usize]
+                    .iter()
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                    + start_pos.character as usize;
+                let end_idx = lines[..end_pos.line as usize]
+                    .iter()
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                    + end_pos.character as usize;
+
+                // Replace the text in the range
+                current_text.replace_range(start_idx..end_idx, &change.text);
+            } else {
+                // If no range is provided, replace the entire content
+                current_text = change.text.clone();
+            }
+
+            self.document_map.insert(uri_str, current_text);
             let diagnostics = self.analyze_document(&params.text_document.uri).await;
             self.client.publish_diagnostics(params.text_document.uri, diagnostics, None).await;
         }

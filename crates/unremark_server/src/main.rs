@@ -78,8 +78,6 @@ impl LanguageServer for UnremarkLanguageServer {
             params.text_document.uri.to_string(),
             params.text_document.text,
         );
-        let diagnostics = self.analyze_document(&params.text_document.uri).await;
-        self.client.publish_diagnostics(params.text_document.uri, diagnostics, None).await;
     }
 
     async fn diagnostic(&self, params: DocumentDiagnosticParams) -> Result<DocumentDiagnosticReportResult> {
@@ -135,8 +133,6 @@ impl LanguageServer for UnremarkLanguageServer {
             }
 
             self.document_map.insert(uri_str, current_text);
-            let diagnostics = self.analyze_document(&params.text_document.uri).await;
-            self.client.publish_diagnostics(params.text_document.uri, diagnostics, None).await;
         }
     }
 

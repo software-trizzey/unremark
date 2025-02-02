@@ -46,12 +46,14 @@ fn collect_comments(node: Node, code: &str) -> Vec<CommentInfo> {
             let context = find_context(child, code);
 
             debug!("Found comment: '{}' of type '{}' on line {}", 
-                comment_text, child.kind(), line_number);
+                comment_text, child.kind(), line_number
+            );
 
             comments.push(CommentInfo {
                 text: comment_text,
                 line_number,
                 context,
+                explanation: Some("This comment may be redundant".to_string())
             });
         }
         comments.extend(collect_comments(child, code));

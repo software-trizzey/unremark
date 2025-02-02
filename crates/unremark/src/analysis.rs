@@ -175,6 +175,8 @@ pub async fn analyze_comments(comments: Vec<CommentInfo>) -> Result<Vec<CommentI
                         if let Ok(analysis) = serde_json::from_str::<CommentAnalysis>(content) {
                             if analysis.comment_line_number == comment.line_number && analysis.is_redundant {
                                 info!("Found redundant comment: {}", analysis.explanation);
+                                let mut comment = comment;
+                                comment.explanation = Some(analysis.explanation);
                                 return Some(comment);
                             }
                         }
@@ -683,6 +685,7 @@ interface Shape {
             text: "// Test comment".to_string(),
             line_number: 1,
             context: "Test context".to_string(),
+            explanation: None,
         };
 
         let result = make_test_api_request(
